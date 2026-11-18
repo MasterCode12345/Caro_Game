@@ -5,8 +5,8 @@
  *
  * Everything runs in the one GLib main-loop thread, so `app` needs no locking.
  *
- * TODO(C2): lobby data: outgoing challenge cid + its "waiting" dialog; incoming challenge
- *           dialogs kept by cid.
+ * Page-local state (lobby list, challenge dialogs, ...) lives in its ui_*.c file.
+ *
  * TODO(C3): board, whose turn, "waiting for 200|MOVE" flag in GameInfo.
  * TODO(C5): history page and replay state; countdown timer source id.
  */
@@ -53,5 +53,10 @@ void       ui_login_reset(const char *error);   /* unlock the form; error may be
 /* ui_lobby.c — page "lobby" */
 GtkWidget *ui_lobby_new(void);
 void       ui_lobby_enter(void);           /* called by app_show_page("lobby") */
+void       ui_lobby_reset(void);           /* session over: close its dialogs, empty the list */
+
+/* ui_game.c — page "game" */
+GtkWidget *ui_game_new(void);
+void       ui_game_enter(void);            /* called by app_show_page("game") */
 
 #endif /* CARO_CLIENT_APP_H */

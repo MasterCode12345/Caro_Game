@@ -55,3 +55,10 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   with Logout. Net/dispatch/fake checked headless under ASan (16 checks, real socket + fake).
   GUI click-through in fake mode passed (format errors, 409/401 messages, button lock,
   login → lobby → logout); C1 ticked. M1 waits for S1.
+- 2026-11-18 · Nghĩa · C2 code: lobby page (top bar + logout, sorted player list from one
+  LIST_PLAYERS, then PLAYER_STATUS add/update/remove), outgoing challenge with waiting/cancel
+  dialog, incoming invitations one dialog per cid, DECLINED/EXPIRED/CANCELLED, GAME_START ->
+  app.game + game page (info only). Fake: 4 scripted players, timed status changes, Ctrl+I /
+  Ctrl+U invitations. Lobby driven headless against fake under ASan (34 checks, incl. 30 s
+  expiry and lost connection with dialogs open). C2 is ticked after the GUI click-through;
+  the 2-window test waits for S2.

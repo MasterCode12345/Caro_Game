@@ -10,7 +10,7 @@
  * gtk_init() + gtk_main() instead of GtkApplication: GtkApplication is single-instance by
  * default, and we run two clients on one machine for testing.
  *
- * TODO(C2–C5): real lobby, game and history pages; each registers its events with dispatch_on().
+ * TODO(C3–C5): real game and history pages; each registers its events with dispatch_on().
  * TODO(C4): on a lost connection, also close every open dialog.
  * TODO(C6): minimum window size.
  */
@@ -23,6 +23,7 @@
 
 #include "app.h"
 #include "dispatch.h"
+#include "fake.h"
 #include "net.h"
 
 #define APP_TITLE   "Caro Online – Group 13"
@@ -49,17 +50,39 @@ void app_show_page(const char *name)
 {
     if (strcmp(name, "lobby") == 0)
         ui_lobby_enter();
+    else if (strcmp(name, "game") == 0)
+        ui_game_enter();
     gtk_stack_set_visible_child_name(app.stack, name);
 }
 
 void app_go_login(const char *error)
 {
+    ui_lobby_reset();                /* no challenge dialog may outlive the session */
     app.state = SESSION_CONNECTED;
     app.username[0] = '\0';
     app.elo = app.wins = app.losses = app.draws = 0;
     memset(&app.game, 0, sizeof app.game);
     ui_login_reset(error);
     app_show_page("login");
+}
+
+/* Offline-mode test keys, lobby page only: Ctrl+I = receive a fake invitation,
+ * Ctrl+U = one that the inviter withdraws after 5 s (Cmd also works on macOS). */
+static gboolean on_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
+{
+    (void)w;
+    (void)data;
+    GdkModifierType mods = ev->state & gtk_accelerator_get_default_mod_mask();
+    const char *page = gtk_stack_get_visible_child_name(app.stack);
+    if ((mods != GDK_CONTROL_MASK && mods != GDK_META_MASK) || page == NULL
+        || strcmp(page, "lobby") != 0)
+        return FALSE;
+    guint key = gdk_keyval_to_lower(ev->keyval);
+    if (key != GDK_KEY_i && key != GDK_KEY_u)
+        return FALSE;
+    if (!fake_simulate_invite(key == GDK_KEY_u))
+        g_printerr("caro_client: fake: nobody idle can invite you right now\n");
+    return TRUE;
 }
 
 int main(int argc, char *argv[])
@@ -85,14 +108,16 @@ int main(int argc, char *argv[])
     gtk_stack_set_transition_type(app.stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_add_named(app.stack, ui_login_new(), "login");
     gtk_stack_add_named(app.stack, ui_lobby_new(), "lobby");
-    gtk_stack_add_named(app.stack, placeholder_page("TODO (C3): game page"), "game");
+    gtk_stack_add_named(app.stack, ui_game_new(), "game");
     gtk_stack_add_named(app.stack, placeholder_page("TODO (C5): history page"), "history");
     gtk_container_add(GTK_CONTAINER(window), stack);
 
     gtk_widget_show_all(window);
     app_show_page("login");
-    if (app.fake_mode)
+    if (app.fake_mode) {
+        g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), NULL);
         g_printerr("caro_client: offline mode (CARO_FAKE=1), no server is used\n");
+    }
 
     gtk_main();
 
