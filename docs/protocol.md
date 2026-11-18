@@ -124,6 +124,7 @@ States: C = CONNECTED, L = LOBBY, Q = IN_QUEUE, G = IN_GAME. "Any" = every state
   Anyone else gets `404 challenge_not_found`.
 - When a player enters a game or the queue, logs out or disconnects, every pending challenge
   involving them is removed and the other side gets `CHALLENGE_CANCELLED|cid`.
+- In a game started from a challenge, the challenger plays X.
 - Matchmaking (`FIND_MATCH`): every second the server pairs two queued players whose ELO
   difference is at most `100 + 50 × floor(waited_seconds / 10)`, capped at 400. Matched games
   use size 15 and 30 seconds per move. The player who waited longer plays X.
