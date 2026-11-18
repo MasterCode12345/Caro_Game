@@ -8,7 +8,7 @@ Turn-based online Caro (Gomoku) for the Network Programming course (IT4062E, SoI
 - **Protocol**: our own, over plain TCP sockets, length-prefixed frames — see
   [`docs/protocol.md`](docs/protocol.md).
 
-Status: project skeleton. Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md).
+Status: in development. Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md).
 
 ## Install
 
@@ -49,6 +49,38 @@ make                       # everything into build/
 
 Switching between `make debug` and `make` rebuilds every object automatically.
 The policy is zero compiler warnings (`-std=c11 -Wall -Wextra`).
+
+## Test server bằng cli
+
+`./build/cli <host> <port>` opens one TCP connection. Each line you type is sent as **one
+frame**, and every frame that arrives is printed at once as `<< payload`, including events the
+server pushes while you are not typing (cli uses `select()` on stdin and the socket).
+
+| Type | cli sends | A correct server (docs/protocol.md §1) |
+| --- | --- | --- |
+| `PING` (any line) | one frame with that line as payload | `<< 200\|PING` |
+| `/bytes <text>` | one frame, **one byte at a time**, 50 ms apart (cut frame) | one response, after the last byte |
+| `/burst <a> ;; <b> ;; <c>` | several frames **in a single `send()`** (glued frames) | one response per frame, in order |
+| `/zero` | a header with LENGTH 0 | logs it and closes the connection |
+| `/huge` | a header announcing LENGTH 20000, no payload | logs it and closes at once (no waiting for 20000 bytes) |
+| `/help` | nothing: lists the commands | — |
+| `/quit` | nothing: closes the connection and exits | — |
+
+Output prefixes: `<<` received frame, `>>` sent line (echoed only when stdin is not a terminal),
+`--` message from cli itself. When the server closes the connection, cli prints
+`-- server closed the connection` and exits.
+
+Input can be piped, for scripted checks. At the end of the input cli half-closes the socket
+(`shutdown(SHUT_WR)`): the server sees `recv() = 0` after the last request, its replies are still
+printed, and cli exits when the server closes its side.
+
+```bash
+printf 'PING\n/bytes PING\n/burst PING ;; PING ;; PING\n' | ./build/cli 127.0.0.1 5500
+printf '/zero\n' | ./build/cli 127.0.0.1 5500      # expect: -- server closed the connection
+```
+
+Milestone M0: run `./build/cli 127.0.0.1 5500` in three terminals at once, `PING` in each, then
+`/bytes PING` and `/burst PING ;; PING ;; PING` — every PING gets exactly one `<< 200|PING`.
 
 ## Team
 

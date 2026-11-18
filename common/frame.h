@@ -27,4 +27,11 @@ int  frame_recv(FrameBuf *fb, int fd);                     /* one recv(); >0 byt
 int  frame_next(FrameBuf *fb, char *out, size_t out_cap);  /* 1 got message, 0 need more, -1 bad frame */
 int  msg_split(char *msg, char *fields[], int max_fields); /* split on '|' in place, returns count */
 
+/* Notes on the contract:
+ * - frame_send(): payload is a C string of 1..FRAME_MAX_PAYLOAD bytes, sent without its '\0'.
+ * - frame_next(): give out_cap >= FRAME_MAX_PAYLOAD + 1; out receives the payload + '\0'.
+ *   -1 means: LENGTH 0, LENGTH > FRAME_MAX_PAYLOAD, or out too small. Close the connection.
+ * - msg_split(): at most max_fields fields (use MAX_FIELDS). If there are more, the last
+ *   field holds the unsplit rest, '|' included, so strict field validation rejects it. */
+
 #endif /* CARO_FRAME_H */

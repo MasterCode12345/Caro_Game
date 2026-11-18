@@ -8,7 +8,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 ## Client — Nghĩa (`client/`, `tools/`, `common/`)
 
-- [ ] **C0** (17–18/11) `common/` framing, `test_frame`, `cli`, GTK window
+- [x] **C0** (17–18/11) `common/` framing, `test_frame`, `cli`, GTK window
 - [ ] **C1** (19–20/11) net layer, dispatch, fake mode, login page
 - [ ] **C2** (21–22/11) lobby page, challenge dialogs
 - [ ] **C3** (23–24/11) board view, moves, result
@@ -43,3 +43,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - 2026-11-18 · Nghĩa · P0 repository skeleton: Makefile, `common/proto.h`, `common/frame.h`
   (`frame.c` stubbed for C0), stub files with TODOs in `server/`, `client/`, `tools/`;
   `caro_client` opens an empty 900×700 GTK window.
+- 2026-11-18 · Nghĩa · C0: `common/frame.c` implemented (length prefix, partial-send loop,
+  EINTR, MSG_NOSIGNAL); `tools/test_frame` 6 tests (byte-by-byte, 3 glued, LENGTH 0/16385/16384,
+  msg_split, frame_send checks, max-size frame), clean under ASan/UBSan; `tools/cli` with
+  `/bytes`, `/burst`, `/zero`, `/huge`, `/quit`, checked against a throwaway framing server.
+  M0 waits for S0 (real server).
