@@ -10,7 +10,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 - [x] **C0** (17–18/11) `common/` framing, `test_frame`, `cli`, GTK window
 - [x] **C1** (19–20/11) net layer, dispatch, fake mode, login page
-- [ ] **C2** (21–22/11) lobby page, challenge dialogs
+- [x] **C2** (21–22/11) lobby page, challenge dialogs
 - [ ] **C3** (23–24/11) board view, moves, result
 - [ ] **C4** (25–26/11) game controls, disconnect handling
 - [ ] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
@@ -60,5 +60,5 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   dialog, incoming invitations one dialog per cid, DECLINED/EXPIRED/CANCELLED, GAME_START ->
   app.game + game page (info only). Fake: 4 scripted players, timed status changes, Ctrl+I /
   Ctrl+U invitations. Lobby driven headless against fake under ASan (34 checks, incl. 30 s
-  expiry and lost connection with dialogs open). C2 is ticked after the GUI click-through;
-  the 2-window test waits for S2.
+  expiry and lost connection with dialogs open). GUI click-through in fake mode passed;
+  C2 ticked. The 2-window test with the real server waits for S2.
