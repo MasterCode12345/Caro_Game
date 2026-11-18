@@ -48,3 +48,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   msg_split, frame_send checks, max-size frame), clean under ASan/UBSan; `tools/cli` with
   `/bytes`, `/burst`, `/zero`, `/huge`, `/quit`, checked against a throwaway framing server.
   M0 waits for S0 (real server).
+- 2026-11-18 · Nghĩa · C1 code: `net.c` (getaddrinfo + non-blocking connect with 3 s timeout,
+  g_io_add_watch, FIFO via `dispatch_expect`, lost-connection handling), `dispatch.c` (response
+  FIFO + COMMAND check, event table, CARO_DEBUG trace with masked passwords), `fake.c` (PING,
+  REGISTER, LOGIN, LOGOUT; time-ordered outbox), 4-page GtkStack, login page, placeholder lobby
+  with Logout. Net/dispatch/fake checked headless under ASan (16 checks, real socket + fake).
+  C1 is ticked after the GUI click-through in fake mode; M1 waits for S1.

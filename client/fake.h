@@ -1,10 +1,18 @@
 /*
- * client/fake.h — interface of fake.c: offline mode (CARO_FAKE=1).
+ * client/fake.h — offline mode (CARO_FAKE=1): a scripted server inside the client.
  * Owner: Nghĩa.
- *
- * TODO(C1): fake_handle(const char *payload), called by net_request() in fake mode.
  */
 #ifndef CARO_CLIENT_FAKE_H
 #define CARO_CLIENT_FAKE_H
+
+#include <glib.h>
+
+void fake_start(void);                   /* "connection" opened: fresh fake session */
+void fake_stop(void);                    /* "connection" closed: drop every undelivered message */
+void fake_handle(const char *payload);   /* a request from net_request() */
+
+/* Delivers msg to dispatch() after delay_ms, from the main loop. Messages come out in order of
+ * their due time, ties in the order they were pushed — like bytes on one TCP connection. */
+void fake_push(guint delay_ms, const char *msg);
 
 #endif /* CARO_CLIENT_FAKE_H */
