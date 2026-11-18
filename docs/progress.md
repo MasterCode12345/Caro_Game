@@ -62,3 +62,12 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   Ctrl+U invitations. Lobby driven headless against fake under ASan (34 checks, incl. 30 s
   expiry and lost connection with dialogs open). GUI click-through in fake mode passed;
   C2 ticked. The 2-window test with the real server waits for S2.
+- 2026-11-18 · Nghĩa · C3 code: `board_view` (cairo board that scales with the window: grid,
+  X/O, last-move outline, green winning cells, hover, click -> row/col), game page (players +
+  ELO, turn, move count; mark drawn only on 200|MOVE; 430–433 messages; OPP_MOVE; GAME_END ->
+  locked board, winning line, result dialog with Vietnamese reason and ELO ±delta, app ELO and
+  W/L/D updated). Fake: MOVE checked in §6.3 order, greedy opponent 0.5 s later, five / full
+  board -> GAME_END. Headless under ASan (27 checks: client board == fake board after every
+  step, a won and a lost game, forced 430, RESIGN/BOARD_FULL texts, lost connection while a
+  move is pending) + rendered PNGs checked. C3 is ticked after the GUI click-through; the
+  2-window test waits for S3.

@@ -23,10 +23,14 @@
  *       fake_simulate_invite() (Ctrl+I / Ctrl+U in main.c): CHALLENGE_FROM from an idle fake
  *       player; accepting gives GAME_START (we play O, the challenger plays X as in §10);
  *       unanswered -> CHALLENGE_EXPIRED after 30 s; with withdraw -> CHALLENGE_CANCELLED after 5 s.
+ *   C3  MOVE checked in the §6.3 order (400, 403, 433, 430, 431, 432) -> 200|MOVE|move_no, then
+ *       0.5 s later OPP_MOVE. The fake opponent is greedy: it plays the empty cell that makes its
+ *       own longest line (random among equal ones) and never blocks — leave it alone to lose,
+ *       build your own five to win. When it plays X it opens 0.5 s after GAME_START.
+ *       Five in a row or a full board -> GAME_END (±16 ELO, 0 for a draw; the real server uses
+ *       the §9 formula), then PLAYER_STATUS with the opponent's new ELO.
  *   anything else -> 400 unknown_command (not faked yet)
  *
- * TODO(C3): MOVE -> 200 then OPP_MOVE on a random empty cell after 0.5 s; simple five-in-a-row
- *           check -> GAME_END.
  * TODO(C4): RESIGN, DRAW_OFFER/DRAW_REPLY, REMATCH/REMATCH_REPLY, LEAVE_GAME.
  * TODO(C5): HISTORY, REPLAY (one 20-move game), LEADERBOARD, FIND_MATCH / CANCEL_MATCH.
  */
@@ -43,6 +47,8 @@
 #define FAKE_ANSWER_MS      2000     /* a fake player answers our challenge after 2 s */
 #define FAKE_WITHDRAW_MS    5000     /* a withdrawn invitation is cancelled after 5 s */
 #define FAKE_MAX_INVITES    8
+#define FAKE_OPP_MOVE_MS    500      /* the fake opponent answers a move after 0.5 s */
+#define FAKE_ELO_DELTA      16
 
 /* ---- outbox: messages and actions, delivered in due-time order ---------------------------------- */
 
@@ -235,13 +241,152 @@ static void clear_challenges(void)
         drop_invite(n_invites - 1);
 }
 
+/* -- the game -- */
+
+static struct {
+    gboolean exists;         /* GAME_START sent (game running or ended) */
+    gboolean running;
+    int      gid, opp;
+    char     me_sym, turn;
+    int      move_no;
+    char     cells[BOARD_SIZE][BOARD_SIZE];
+} game;
+static int me_elo = ELO_START;
+
+static const int DIRS[4][2] = { { 0, 1 }, { 1, 0 }, { 1, 1 }, { 1, -1 } };
+
+static char other(char sym)
+{
+    return sym == 'X' ? 'O' : 'X';
+}
+
+static gboolean in_board(int r, int c)
+{
+    return r >= 0 && c >= 0 && r < BOARD_SIZE && c < BOARD_SIZE;
+}
+
+/* Cells of `mark` next to (r,c) going (dr,dc), (r,c) itself not counted. */
+static int count_dir(int r, int c, int dr, int dc, char mark)
+{
+    int k = 0;
+    for (int rr = r + dr, cc = c + dc; in_board(rr, cc) && game.cells[rr][cc] == mark; rr += dr, cc += dc)
+        k++;
+    return k;
+}
+
+/* After a mark at (r,c): five or more in a row? line = 5 consecutive cells including (r,c). */
+static gboolean find_five(int r, int c, int line[WIN_LENGTH][2])
+{
+    char m = game.cells[r][c];
+    for (int d = 0; d < 4; d++) {
+        int dr = DIRS[d][0], dc = DIRS[d][1];
+        int back = count_dir(r, c, -dr, -dc, m), fwd = count_dir(r, c, dr, dc, m);
+        if (back + fwd + 1 < WIN_LENGTH)
+            continue;
+        int w = MAX(-back, -(WIN_LENGTH - 1));        /* window start, relative to (r,c) */
+        if (w + WIN_LENGTH - 1 > fwd)
+            w = fwd - (WIN_LENGTH - 1);
+        for (int i = 0; i < WIN_LENGTH; i++) {
+            line[i][0] = r + (w + i) * dr;
+            line[i][1] = c + (w + i) * dc;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* Longest line `mark` would have through the empty cell (r,c). */
+static int line_if_played(int r, int c, char mark)
+{
+    int best = 1;
+    for (int d = 0; d < 4; d++)
+        best = MAX(best, 1 + count_dir(r, c, DIRS[d][0], DIRS[d][1], mark)
+                            + count_dir(r, c, -DIRS[d][0], -DIRS[d][1], mark));
+    return best;
+}
+
+/* winner: 'X', 'O', or 0 for a draw. GAME_END to us, then the opponent's new ELO to "others". */
+static void end_game(char winner, const char *reason, int line[WIN_LENGTH][2], guint delay_ms)
+{
+    game.running = FALSE;
+    int delta = winner == 0 ? 0 : winner == game.me_sym ? FAKE_ELO_DELTA : -FAKE_ELO_DELTA;
+    me_elo += delta;
+    players[game.opp].elo -= delta;
+
+    GString *s = g_string_new(NULL);
+    g_string_printf(s, "%s|%d|%s|%s|%d|", EV_GAME_END, game.gid,
+                    winner == 'X' ? RES_X_WIN : winner == 'O' ? RES_O_WIN : RES_DRAW, reason, me_elo);
+    if (delta == 0)
+        g_string_append(s, "0");                 /* §2: signed deltas, but 0 has no sign */
+    else
+        g_string_append_printf(s, "%+d", delta);
+    for (int i = 0; line != NULL && i < WIN_LENGTH; i++)
+        g_string_append_printf(s, "|%d,%d", line[i][0], line[i][1]);
+    fake_push(delay_ms, s->str);
+    g_string_free(s, TRUE);
+    set_status(game.opp, PS_IN_GAME, players[game.opp].elo, delay_ms);
+}
+
+/* After a mark at (r,c) by `sym`: GAME_END if it won or filled the board. TRUE if the game ended. */
+static gboolean check_end(int r, int c, char sym, guint delay_ms)
+{
+    int line[WIN_LENGTH][2];
+    if (find_five(r, c, line))
+        end_game(sym, END_FIVE, line, delay_ms);
+    else if (game.move_no == BOARD_SIZE * BOARD_SIZE)
+        end_game(0, END_BOARD_FULL, NULL, delay_ms);
+    else
+        return FALSE;
+    return TRUE;
+}
+
+static void act_opp_move(gpointer arg)
+{
+    char sym = other(game.me_sym);
+    if (!game.running || game.gid != GPOINTER_TO_INT(arg) || game.turn != sym)
+        return;
+    int best = 0, n_best = 0, pick_r = -1, pick_c = -1;
+    for (int r = 0; r < BOARD_SIZE; r++) {
+        for (int c = 0; c < BOARD_SIZE; c++) {
+            if (game.cells[r][c] != '.')
+                continue;
+            int len = line_if_played(r, c, sym);
+            if (len > best) {
+                best = len;
+                n_best = 0;
+            }
+            if (len == best && g_random_int_range(0, ++n_best) == 0) {   /* uniform among ties */
+                pick_r = r;
+                pick_c = c;
+            }
+        }
+    }
+    if (pick_r < 0)
+        return;
+    game.cells[pick_r][pick_c] = sym;
+    game.move_no++;
+    game.turn = game.me_sym;
+    push_fmt(0, "%s|%d|%d|%d|%d", EV_OPP_MOVE, game.gid, pick_r, pick_c, game.move_no);
+    check_end(pick_r, pick_c, sym, 0);
+}
+
 static void start_game(int opp, char my_symbol, guint delay_ms)
 {
     clear_challenges();
     fstate = SESSION_IN_GAME;
-    push_fmt(delay_ms, "%s|%d|%d|%c|%s|%d|%d", EV_GAME_START, next_gid++, BOARD_SIZE, my_symbol,
+    memset(&game, 0, sizeof game);
+    game.exists = game.running = TRUE;
+    game.gid = next_gid++;
+    game.opp = opp;
+    game.me_sym = my_symbol;
+    game.turn = 'X';
+    memset(game.cells, '.', sizeof game.cells);
+
+    push_fmt(delay_ms, "%s|%d|%d|%c|%s|%d|%d", EV_GAME_START, game.gid, BOARD_SIZE, my_symbol,
              players[opp].name, players[opp].elo, SEC_PER_MOVE_NORMAL);
     set_status(opp, PS_IN_GAME, players[opp].elo, delay_ms);   /* others learn it after GAME_START */
+    if (my_symbol == 'O')                                      /* the fake opponent opens */
+        later(delay_ms + FAKE_OPP_MOVE_MS, act_opp_move, GINT_TO_POINTER(game.gid));
 }
 
 /* -- scripted actions (run at their due time) -- */
@@ -334,6 +479,8 @@ void fake_stop(void)
         fake_msg_free(m);
 
     memcpy(players, initial_players, sizeof players);
+    memset(&game, 0, sizeof game);
+    me_elo = ELO_START;
     fstate = SESSION_CONNECTED;
     me[0] = '\0';
     script_started = FALSE;
@@ -384,7 +531,7 @@ static void fake_login(char **f, int n)
     } else {
         fstate = SESSION_LOBBY;
         g_strlcpy(me, f[1], sizeof me);
-        reply("%d|%s|%s|%d|%d|%d|%d", ST_OK, CMD_LOGIN, me, ELO_START, 0, 0, 0);
+        reply("%d|%s|%s|%d|%d|%d|%d", ST_OK, CMD_LOGIN, me, me_elo, 0, 0, 0);
     }
 }
 
@@ -489,6 +636,34 @@ static void fake_challenge_reply(char **f, int n)
     }
 }
 
+/* MOVE|gid|row|col — checks in the exact order of docs/protocol.md §6.3, first failure wins. */
+static void fake_move(char **f, int n)
+{
+    if (!allowed(CMD_MOVE, IN(SESSION_IN_GAME)))
+        return;
+    int gid, r, c;
+    if (n != 4 || !field_int(f[1], &gid) || !field_int(f[2], &r) || !field_int(f[3], &c))
+        reply("%d|%s|%s", ST_BAD_REQUEST, CMD_MOVE, ERR_BAD_ARGS);
+    else if (!game.exists || gid != game.gid)
+        reply("%d|%s|%s", ST_FORBIDDEN, CMD_MOVE, ERR_NOT_IN_GAME);
+    else if (!game.running)
+        reply("%d|%s|%s", ST_GAME_NOT_ACTIVE, CMD_MOVE, ERR_GAME_NOT_ACTIVE);
+    else if (game.turn != game.me_sym)
+        reply("%d|%s|%s", ST_NOT_YOUR_TURN, CMD_MOVE, ERR_NOT_YOUR_TURN);
+    else if (!in_board(r, c))
+        reply("%d|%s|%s", ST_OUT_OF_BOARD, CMD_MOVE, ERR_OUT_OF_BOARD);
+    else if (game.cells[r][c] != '.')
+        reply("%d|%s|%s", ST_CELL_OCCUPIED, CMD_MOVE, ERR_CELL_OCCUPIED);
+    else {
+        game.cells[r][c] = game.me_sym;
+        game.move_no++;
+        game.turn = other(game.me_sym);
+        reply("%d|%s|%d", ST_OK, CMD_MOVE, game.move_no);        /* response first (§3) ... */
+        if (!check_end(r, c, game.me_sym, FAKE_LATENCY_MS))      /* ... then GAME_END */
+            later(FAKE_LATENCY_MS + FAKE_OPP_MOVE_MS, act_opp_move, GINT_TO_POINTER(game.gid));
+    }
+}
+
 gboolean fake_simulate_invite(gboolean withdraw)
 {
     if (fstate != SESSION_LOBBY || n_invites == FAKE_MAX_INVITES)
@@ -536,6 +711,8 @@ void fake_handle(const char *payload)
         fake_challenge_cancel(f, n);
     else if (strcmp(cmd, CMD_CHALLENGE_REPLY) == 0)
         fake_challenge_reply(f, n);
+    else if (strcmp(cmd, CMD_MOVE) == 0)
+        fake_move(f, n);
     else
         reply("%d|%s|%s", ST_BAD_REQUEST, cmd, ERR_UNKNOWN_COMMAND);
 

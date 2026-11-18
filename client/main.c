@@ -57,7 +57,8 @@ void app_show_page(const char *name)
 
 void app_go_login(const char *error)
 {
-    ui_lobby_reset();                /* no challenge dialog may outlive the session */
+    ui_lobby_reset();                /* no dialog may outlive the session */
+    ui_game_reset();
     app.state = SESSION_CONNECTED;
     app.username[0] = '\0';
     app.elo = app.wins = app.losses = app.draws = 0;

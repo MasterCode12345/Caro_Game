@@ -7,7 +7,6 @@
  *
  * Page-local state (lobby list, challenge dialogs, ...) lives in its ui_*.c file.
  *
- * TODO(C3): board, whose turn, "waiting for 200|MOVE" flag in GameInfo.
  * TODO(C5): history page and replay state; countdown timer source id.
  */
 #ifndef CARO_CLIENT_APP_H
@@ -17,7 +16,8 @@
 
 #include "proto.h"
 
-/* The game in progress, filled from GAME_START (C2/C3). */
+/* The game in progress: filled from GAME_START (ui_lobby.c), played in ui_game.c. The cells
+ * themselves live in the game page's BoardView. */
 typedef struct {
     gboolean active;
     int      gid;
@@ -26,6 +26,12 @@ typedef struct {
     char     opponent[USERNAME_MAX + 1];
     int      opp_elo;
     int      sec_per_move;
+
+    char     turn;                         /* whose move it is: 'X' or 'O' (X moves first) */
+    int      move_no;                      /* moves played so far */
+    gboolean move_pending;                 /* MOVE sent, its response not received yet */
+    int      pending_row, pending_col;
+    gboolean ended;                        /* GAME_END received: the board is locked */
 } GameInfo;
 
 typedef struct {
@@ -57,6 +63,7 @@ void       ui_lobby_reset(void);           /* session over: close its dialogs, e
 
 /* ui_game.c — page "game" */
 GtkWidget *ui_game_new(void);
-void       ui_game_enter(void);            /* called by app_show_page("game") */
+void       ui_game_enter(void);            /* called by app_show_page("game"): new board */
+void       ui_game_reset(void);            /* session over: close the result dialog */
 
 #endif /* CARO_CLIENT_APP_H */
