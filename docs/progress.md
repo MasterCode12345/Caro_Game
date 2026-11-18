@@ -11,7 +11,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **C0** (17–18/11) `common/` framing, `test_frame`, `cli`, GTK window
 - [x] **C1** (19–20/11) net layer, dispatch, fake mode, login page
 - [x] **C2** (21–22/11) lobby page, challenge dialogs
-- [ ] **C3** (23–24/11) board view, moves, result
+- [x] **C3** (23–24/11) board view, moves, result
 - [ ] **C4** (25–26/11) game controls, disconnect handling
 - [ ] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
 - [ ] **C6** (29/11) bot, LAN test, polish
@@ -69,5 +69,5 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   W/L/D updated). Fake: MOVE checked in §6.3 order, greedy opponent 0.5 s later, five / full
   board -> GAME_END. Headless under ASan (27 checks: client board == fake board after every
   step, a won and a lost game, forced 430, RESIGN/BOARD_FULL texts, lost connection while a
-  move is pending) + rendered PNGs checked. C3 is ticked after the GUI click-through; the
-  2-window test waits for S3.
+  move is pending) + rendered PNGs checked. GUI click-through in fake mode passed (win, loss,
+  win on the board edge); C3 ticked. The 2-window test with the real server waits for S3.
