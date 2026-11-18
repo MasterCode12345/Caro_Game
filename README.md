@@ -50,6 +50,34 @@ make                       # everything into build/
 Switching between `make debug` and `make` rebuilds every object automatically.
 The policy is zero compiler warnings (`-std=c11 -Wall -Wextra`).
 
+## Chạy client
+
+```bash
+./build/caro_client                            # normal: connects to the server typed on the login page
+CARO_FAKE=1 ./build/caro_client                # offline: fake.c plays the server, no socket is opened
+CARO_DEBUG=1 ./build/caro_client               # print every message sent/received on stderr
+CARO_FAKE=1 CARO_DEBUG=1 ./build/caro_client   # both
+```
+
+- **Login page**: Server (default `127.0.0.1`), Port (default `5500`), username, password.
+  The format is checked before anything is sent (docs/protocol.md §2): username 3–20 characters
+  `[A-Za-z0-9_]`, password 6–32 printable ASCII characters, no space, no `|`.
+- **`CARO_FAKE=1`** — the window title ends with `[offline]`. Replies arrive after 300 ms through
+  the same `dispatch()` path as real messages, so the UI cannot tell the difference. Test inputs:
+
+  | Input | Fake reply | Message shown |
+  | --- | --- | --- |
+  | password `wrong` | `401` `invalid_credentials` | Sai tên đăng nhập hoặc mật khẩu |
+  | register username `taken` | `409` `username_taken` | Tên đã tồn tại |
+  | login username `online` | `409` `already_logged_in` | Tài khoản đang đăng nhập ở nơi khác |
+  | anything else | `201` (register) / `200`, ELO 1000 (login) | Đăng ký thành công… / lobby page |
+
+- **`CARO_DEBUG=1`** — one line per message, for the demo:
+  `[21:04:05.123] >> LOGIN|nghia|******` then `[21:04:05.125] << 200|LOGIN|nghia|1000|0|0|0`.
+  Passwords are always masked. Warnings (a response that does not match the waiting request,
+  an unknown event) are printed even without `CARO_DEBUG`.
+- Two clients on one machine: just start `./build/caro_client` twice.
+
 ## Test server bằng cli
 
 `./build/cli <host> <port>` opens one TCP connection. Each line you type is sent as **one

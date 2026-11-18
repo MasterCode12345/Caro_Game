@@ -9,7 +9,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 ## Client — Nghĩa (`client/`, `tools/`, `common/`)
 
 - [x] **C0** (17–18/11) `common/` framing, `test_frame`, `cli`, GTK window
-- [ ] **C1** (19–20/11) net layer, dispatch, fake mode, login page
+- [x] **C1** (19–20/11) net layer, dispatch, fake mode, login page
 - [ ] **C2** (21–22/11) lobby page, challenge dialogs
 - [ ] **C3** (23–24/11) board view, moves, result
 - [ ] **C4** (25–26/11) game controls, disconnect handling
@@ -53,4 +53,5 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   FIFO + COMMAND check, event table, CARO_DEBUG trace with masked passwords), `fake.c` (PING,
   REGISTER, LOGIN, LOGOUT; time-ordered outbox), 4-page GtkStack, login page, placeholder lobby
   with Logout. Net/dispatch/fake checked headless under ASan (16 checks, real socket + fake).
-  C1 is ticked after the GUI click-through in fake mode; M1 waits for S1.
+  GUI click-through in fake mode passed (format errors, 409/401 messages, button lock,
+  login → lobby → logout); C1 ticked. M1 waits for S1.
