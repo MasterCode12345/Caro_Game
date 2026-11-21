@@ -26,3 +26,42 @@
  *           <= MM_BASE_GAP + MM_STEP_GAP * floor(waited / MM_STEP_SEC), capped at MM_MAX_GAP;
  *           BOARD_SIZE, MATCH_SEC_PER_MOVE; the player who waited longer plays X.
  */
+
+#include "lobby.h"
+#include "net.h"
+
+#include <stdio.h>
+
+/* Broadcast status to all logged-in clients except the sender. */
+void broadcast_status(const Client *exclude,
+                     const char *username,
+                     const char *status,
+                     int elo)
+{
+    if (username == NULL || status == NULL)
+        return;
+
+    char event[128];
+
+    int len = snprintf(event, sizeof(event),
+                       "PLAYER_STATUS|%s|%s|%d",
+                       username, status, elo);
+
+    if (len < 0 || (size_t)len >= sizeof(event))
+        return;
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        Client *c = &clients[i];
+
+        if (c->fd < 0 || c == exclude)
+            continue;
+
+        /* Only clients who have logged in receive this event. */
+        if (c->state != SESSION_LOBBY &&
+            c->state != SESSION_IN_QUEUE &&
+            c->state != SESSION_IN_GAME)
+            continue;
+
+        send_event(c, "%s", event);
+    }
+}

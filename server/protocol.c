@@ -1,31 +1,12 @@
 /*
- * server/protocol.c — command table, state checks, dispatch to handlers.
- * Owner: Hân.
- *
- * The server answers every request with exactly one response, in the order received
- * (docs/protocol.md §3). Events caused by a request are sent after its response.
- *
- * SKELETON: no code yet. Stages (CLAUDE.md Roadmap):
- * TODO(S0): msg_split() the payload (MAX_FIELDS); look up COMMAND in a table
- *           { name, allowed states C/L/Q/G, handler }; unknown -> 400|<COMMAND>|unknown_command.
- * TODO(S0): state rule (§4): command not allowed in the current state ->
- *           401|CMD|not_logged_in if not logged in, otherwise 403|CMD|forbidden_state.
- * TODO(S0): PING (any state) -> 200|PING.
- * TODO(S1): REGISTER, LOGIN, LOGOUT (auth.c).
- * TODO(S2): LIST_PLAYERS, CHALLENGE, CHALLENGE_REPLY, CHALLENGE_CANCEL (lobby.c).
- * TODO(S3): MOVE (match.c).
- * TODO(S4): RESIGN, DRAW_OFFER, DRAW_REPLY, REMATCH, REMATCH_REPLY, LEAVE_GAME (match.c).
- * TODO(S6): HISTORY, REPLAY, LEADERBOARD, STATS.
- * TODO(S7): FIND_MATCH, CANCEL_MATCH (lobby.c).
- * TODO(S8): wrong field count or non-numeric field -> 400 bad_args, never crash.
- */
-/*
  * server/protocol.c — protocol command dispatch.
  * Owner: Hân.
  *
- * S0: command table and PING handler.
+ * S1: REGISTER, LOGIN, LOGOUT.
+ * S0: command table, state checks and PING.
  */
 #include "protocol.h"
+#include "auth.h"
 #include "net.h"
 
 #include <string.h>
@@ -37,6 +18,10 @@
                    STATE_BIT(SESSION_IN_QUEUE) | \
                    STATE_BIT(SESSION_IN_GAME))
 
+#define AUTH_STATES (STATE_BIT(SESSION_CONNECTED))
+#define LOGOUT_STATES (STATE_BIT(SESSION_LOBBY) | \
+                      STATE_BIT(SESSION_IN_QUEUE))
+
 typedef void (*CommandHandler)(Client *c, char *fields[], int nfields);
 
 typedef struct {
@@ -47,7 +32,7 @@ typedef struct {
     CommandHandler handler;
 } Command;
 
-/* S0 handler: PING -> 200|PING */
+/* PING -> 200|PING */
 static void handle_ping(Client *c, char *fields[], int nfields)
 {
     (void)fields;
@@ -56,9 +41,12 @@ static void handle_ping(Client *c, char *fields[], int nfields)
     reply(c, 200, "PING", NULL);
 }
 
-/* S0: only PING is registered. */
+/* Command table. Field counts include the command name. */
 static const Command commands[] = {
-    { "PING", ALL_STATES, 1, 1, handle_ping }
+    { "PING",     ALL_STATES,    1, 1, handle_ping },
+    { "REGISTER", AUTH_STATES,   3, 3, handle_register },
+    { "LOGIN",    AUTH_STATES,   3, 3, handle_login },
+    { "LOGOUT",   LOGOUT_STATES, 1, 1, handle_logout }
 };
 
 void handle_message(Client *c, char *msg)

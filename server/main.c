@@ -8,12 +8,13 @@
  * every client and keeps shared server state in one place.
  *
  * S0: listener, select() loop, framing, message handling and tick().
- * Later stages extend tick() with challenge expiry and matchmaking timers.
+ * S1: open SQLite database at startup.
  */
 #include "server.h"
 #include "net.h"
 #include "protocol.h"
 #include "log.h"
+#include "db.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,8 +64,6 @@ int main(int argc, char *argv[])
     int opt = 1;
     struct sockaddr_in server_addr;
 
-    (void)db_path; /* S1 will use this argument to open the database. */
-
     if (argc > 3) {
         fprintf(stderr, "Usage: %s [port] [db_path]\n", argv[0]);
         return EXIT_FAILURE;
@@ -88,9 +87,16 @@ int main(int argc, char *argv[])
 
     log_open("server.log");
 
+    /* S1: initialize SQLite database. */
+    if (db_open(db_path) != 0) {
+        fprintf(stderr, "Failed to open database: %s\n", db_path);
+        return EXIT_FAILURE;
+    }
+
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) {
         perror("socket");
+        db_close();
         return EXIT_FAILURE;
     }
 
@@ -98,6 +104,7 @@ int main(int argc, char *argv[])
                    &opt, sizeof(opt)) < 0) {
         perror("setsockopt SO_REUSEADDR");
         close(listenfd);
+        db_close();
         return EXIT_FAILURE;
     }
 
@@ -110,17 +117,19 @@ int main(int argc, char *argv[])
              sizeof(server_addr)) < 0) {
         perror("bind");
         close(listenfd);
+        db_close();
         return EXIT_FAILURE;
     }
 
     if (listen(listenfd, 16) < 0) {
         perror("listen");
         close(listenfd);
+        db_close();
         return EXIT_FAILURE;
     }
 
     printf("Caro server listening on port %d\n", port);
-    printf("Database path (reserved for S1): %s\n", db_path);
+    printf("Database: %s\n", db_path);
 
     /* Main select() loop. */
     while (1) {
@@ -213,5 +222,6 @@ int main(int argc, char *argv[])
     }
 
     close(listenfd);
+    db_close();
     return EXIT_FAILURE;
 }

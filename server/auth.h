@@ -1,10 +1,14 @@
 /*
- * server/auth.h — interface of auth.c: REGISTER, LOGIN, LOGOUT handlers.
+ * server/auth.h — REGISTER, LOGIN, LOGOUT handlers.
  * Owner: Hân.
- *
- * TODO(S1): declare the three handlers registered in protocol.c's command table.
  */
 #ifndef CARO_SERVER_AUTH_H
 #define CARO_SERVER_AUTH_H
+
+#include "server.h"
+
+void handle_register(Client *c, char *fields[], int nfields);
+void handle_login(Client *c, char *fields[], int nfields);
+void handle_logout(Client *c, char *fields[], int nfields);
 
 #endif /* CARO_SERVER_AUTH_H */

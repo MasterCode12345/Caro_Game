@@ -3,10 +3,12 @@
  * Owner: Hân.
  *
  * S0: accept connections, receive framed messages, send replies and close sessions.
+ * S1: broadcast OFFLINE when a logged-in client disconnects.
  */
 #include "net.h"
 #include "protocol.h"
 #include "log.h"
+#include "lobby.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -180,6 +182,21 @@ void session_end(Client *c)
 {
     if (c == NULL || c->fd < 0)
         return;
+
+    /* Preserve account information before resetting the client. */
+    int was_logged_in = (c->state == SESSION_LOBBY ||
+                         c->state == SESSION_IN_QUEUE ||
+                         c->state == SESSION_IN_GAME);
+
+    char username[USERNAME_MAX + 1];
+    int elo = c->elo;
+
+    snprintf(username, sizeof(username), "%s", c->username);
+
+    /* Notify other logged-in clients before closing this session. */
+    if (was_logged_in && username[0] != '\0') {
+        broadcast_status(c, username, PS_OFFLINE, elo);
+    }
 
     log_event("disconnected: %s", c->addr);
 

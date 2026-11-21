@@ -1,13 +1,19 @@
 /*
- * server/lobby.h — interface of lobby.c: players list, PLAYER_STATUS, challenges, matchmaking.
+ * server/lobby.h — interface of lobby.c.
  * Owner: Hân.
  *
- * TODO(S2): declare the LIST_PLAYERS / CHALLENGE* handlers, the PLAYER_STATUS broadcast helper,
- *           the challenge-expiry function called from tick(), the "remove challenges of a
- *           player" function used by session_end() / LOGOUT / game start.
- * TODO(S7): declare FIND_MATCH / CANCEL_MATCH handlers and the matchmaking pass for tick().
+ * S1: PLAYER_STATUS broadcast.
+ * Later stages: players list, challenges and matchmaking.
  */
 #ifndef CARO_SERVER_LOBBY_H
 #define CARO_SERVER_LOBBY_H
+
+#include "server.h"
+
+/* Broadcast player status to every other logged-in client. */
+void broadcast_status(const Client *exclude,
+                     const char *username,
+                     const char *status,
+                     int elo);
 
 #endif /* CARO_SERVER_LOBBY_H */
