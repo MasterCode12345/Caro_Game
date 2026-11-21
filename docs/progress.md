@@ -18,7 +18,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 ## Server — Hân (`server/`)
 
-- [ ] **S0** (17–18/11) select loop, framing, PING, log
+- [x] **S0** (17–18/11) select loop, framing, PING, log
 - [ ] **S1** (19–20/11) SQLite, REGISTER/LOGIN/LOGOUT, sessions
 - [ ] **S2** (21–22/11) lobby, challenges, expiry
 - [ ] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
@@ -77,3 +77,10 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   ELO calculation (`server/elo.h/.c`, expected score and rating update, K=32).
   Added `test_game` (12 tests) and `test_elo` (10 tests); both test suites passed.
   S-pre pending clean `make` and manual checks before ticking.
+- 2026-11-21 · Hân · S0: implemented select()-based server loop, socket accept,
+  framing and PING handling; malformed frames (zero-length/oversize) close the
+  offending client; logging for connect/disconnect and command responses.
+  Manual CLI checks: PING, ABC (unknown command), /bytes, /burst (3 glued
+  requests), /zero, /huge, reconnect after malformed frames, concurrent clients
+  and disconnect. `make` clean (zero warnings); `make test` passed
+  (test_frame 6/6, test_game 12/12, test_elo 10/10).

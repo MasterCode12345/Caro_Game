@@ -2,18 +2,47 @@
  * server/server.h — shared server data: Client / Challenge / Game structs and the global tables.
  * Owner: Hân.
  *
- * SKELETON: no declarations yet. Stages (CLAUDE.md Roadmap):
- * TODO(S0): Client: fd (-1 = free slot), FrameBuf (common/frame.h), peer "IP:port" for the log,
- *           SessionState (common/proto.h). A fixed client table (select() handles at most
- *           FD_SETSIZE descriptors).
- * TODO(S1): Client: logged-in username, elo, wins, losses, draws.
- * TODO(S2): Challenge: cid, challenger, target, size, sec, creation time; challenge table.
- * TODO(S3): Game: gid, the X and O players, the board (game.h), sec_per_move, ended flag;
- *           game table; link Client -> current game.
- * TODO(S4): Game: pending draw offer, pending rematch request, opponent-left flag.
- * TODO(S7): Client: time it joined the matchmaking queue; Game: deadline of the current move.
+ * S0: Client table and shared client data for the select() loop.
+ * Later stages extend Client with account, challenge, game and matchmaking data.
  */
 #ifndef CARO_SERVER_H
 #define CARO_SERVER_H
+
+#include <time.h>
+
+#include "../common/frame.h"
+#include "../common/proto.h"
+
+#define MAX_CLIENTS 100
+
+/* Reuse SessionState from common/proto.h. */
+
+/* Game will be implemented in later stages. */
+struct Game;
+
+typedef struct Client {
+    int fd;                         /* -1 = free slot */
+    char addr[64];                  /* IP:port */
+    SessionState state;
+
+    /* S1: account data */
+    int user_id;
+    char username[21];
+    int elo;
+    int wins;
+    int losses;
+    int draws;
+
+    /* S0: receive buffer for TCP framing */
+    FrameBuf in;
+
+    /* S3: current game */
+    struct Game *game;
+
+    /* S7: matchmaking queue timestamp */
+    time_t queued_at;
+} Client;
+
+extern Client clients[MAX_CLIENTS];
 
 #endif /* CARO_SERVER_H */

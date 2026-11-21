@@ -2,29 +2,216 @@
  * server/main.c — entry point of caro_server.
  * Owner: Hân.
  *
- * Responsibility: parse argv, open the listening socket, run the single select() loop over
- * the listening socket and every client, call tick(now) after every loop iteration.
- * One process, one thread, I/O multiplexing with select() (Lec05) — see CLAUDE.md "Server"
- * for why not fork() and not threads.
+ * Uses one process and one select() loop instead of fork() or threads.
+ * select() lets one process monitor the listening socket and multiple client
+ * sockets concurrently. This avoids creating a separate process/thread for
+ * every client and keeps shared server state in one place.
  *
- * SKELETON: only prints a message. Stages (CLAUDE.md Roadmap):
- * TODO(S0): `./build/caro_server [port]`, default DEFAULT_PORT (common/proto.h); validate the
- *           port with strtol + end pointer.
- * TODO(S0): signal(SIGPIPE, SIG_IGN) at the start of main() (MSG_NOSIGNAL is 0 on macOS).
- * TODO(S0): socket() + bind() + listen(), checking every return value.
- * TODO(S0): select() loop with a 1 s timeout: re-initialise the fd_sets and the struct timeval
- *           on every iteration; handle EINTR; listening fd readable -> accept (net.c);
- *           client fd readable -> receive (net.c); then tick(now).
- * TODO(S0): open server.log at start-up (log.c).
- * TODO(S1): open the SQLite database at start-up (db.c), create the tables if missing.
- * TODO(S2): tick(now): challenge expiry (lobby.c).
- * TODO(S7): tick(now): matchmaking pass (lobby.c) and move timers -> TIMEOUT (match.c).
- * TODO(S8): free everything and close the DB/log on exit so valgrind is clean.
+ * S0: listener, select() loop, framing, message handling and tick().
+ * Later stages extend tick() with challenge expiry and matchmaking timers.
  */
-#include <stdio.h>
+#include "server.h"
+#include "net.h"
+#include "protocol.h"
+#include "log.h"
 
-int main(void)
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <errno.h>
+#include <limits.h>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+Client clients[MAX_CLIENTS];
+
+/* S0: no timer tasks yet. S2/S7 will extend this function. */
+static void tick(time_t now)
 {
-    printf("caro_server: not implemented yet\n");
+    (void)now;
+}
+
+static int parse_port(const char *arg, int *port)
+{
+    char *endptr;
+    long value;
+
+    errno = 0;
+    value = strtol(arg, &endptr, 10);
+
+    if (errno != 0 || endptr == arg || *endptr != '\0' ||
+        value < 1 || value > 65535) {
+        return -1;
+    }
+
+    *port = (int)value;
     return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    int port = DEFAULT_PORT;
+    const char *db_path = "caro.db";
+    int listenfd;
+    int opt = 1;
+    struct sockaddr_in server_addr;
+
+    (void)db_path; /* S1 will use this argument to open the database. */
+
+    if (argc > 3) {
+        fprintf(stderr, "Usage: %s [port] [db_path]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    if (argc >= 2 && parse_port(argv[1], &port) != 0) {
+        fprintf(stderr, "Invalid port: %s\n", argv[1]);
+        return EXIT_FAILURE;
+    }
+
+    if (argc >= 3) {
+        db_path = argv[2];
+    }
+
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Initialize every client slot as free. */
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        clients[i].fd = -1;
+    }
+
+    log_open("server.log");
+
+    listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenfd < 0) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
+
+    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,
+                   &opt, sizeof(opt)) < 0) {
+        perror("setsockopt SO_REUSEADDR");
+        close(listenfd);
+        return EXIT_FAILURE;
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons((unsigned short)port);
+
+    if (bind(listenfd, (struct sockaddr *)&server_addr,
+             sizeof(server_addr)) < 0) {
+        perror("bind");
+        close(listenfd);
+        return EXIT_FAILURE;
+    }
+
+    if (listen(listenfd, 16) < 0) {
+        perror("listen");
+        close(listenfd);
+        return EXIT_FAILURE;
+    }
+
+    printf("Caro server listening on port %d\n", port);
+    printf("Database path (reserved for S1): %s\n", db_path);
+
+    /* Main select() loop. */
+    while (1) {
+        fd_set readfds;
+        int maxfd = listenfd;
+        struct timeval timeout;
+        int ready;
+
+        FD_ZERO(&readfds);
+        FD_SET(listenfd, &readfds);
+
+        /* Add every active client socket to the set. */
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].fd >= 0) {
+                if (clients[i].fd >= FD_SETSIZE) {
+                    session_end(&clients[i]);
+                    continue;
+                }
+
+                FD_SET(clients[i].fd, &readfds);
+
+                if (clients[i].fd > maxfd) {
+                    maxfd = clients[i].fd;
+                }
+            }
+        }
+
+        /* select() modifies timeval, so reset it every iteration. */
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
+
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            perror("select");
+            break;
+        }
+
+        /* A new connection is waiting. */
+        if (FD_ISSET(listenfd, &readfds)) {
+            accept_client(listenfd);
+        }
+
+        /* Process readable clients. */
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            Client *c = &clients[i];
+
+            if (c->fd < 0) {
+                continue;
+            }
+
+            if (!FD_ISSET(c->fd, &readfds)) {
+                continue;
+            }
+
+            int recv_result = frame_recv(&c->in, c->fd);
+
+            if (recv_result <= 0) {
+                session_end(c);
+                continue;
+            }
+
+            char msg[FRAME_MAX_PAYLOAD + 1];
+
+            /* Drain every complete frame in the receive buffer. */
+            while (c->fd >= 0) {
+                int frame_result = frame_next(
+                    &c->in, msg, sizeof(msg)
+                );
+
+                if (frame_result == 0) {
+                    break; /* Need more bytes. */
+                }
+
+                if (frame_result < 0) {
+                    session_end(c);
+                    break;
+                }
+
+                handle_message(c, msg);
+            }
+        }
+
+        /* S0: currently empty; S2/S7 will use this for timers. */
+        tick(time(NULL));
+    }
+
+    close(listenfd);
+    return EXIT_FAILURE;
 }

@@ -1,12 +1,15 @@
 /*
- * server/net.h — interface of net.c: accept, per-client receive, reply(), session_end().
+ * server/net.h — connection layer.
  * Owner: Hân.
- *
- * TODO(S0): declare the accept and receive entry points used by main.c, reply() and
- *           session_end().
- * TODO(S1): declare the event senders (to one client / to every logged-in client except one).
  */
 #ifndef CARO_SERVER_NET_H
 #define CARO_SERVER_NET_H
+
+#include "server.h"
+
+int accept_client(int listenfd);
+int reply(Client *c, int code, const char *cmd, const char *fmt, ...);
+int send_event(Client *c, const char *fmt, ...);
+void session_end(Client *c);
 
 #endif /* CARO_SERVER_NET_H */

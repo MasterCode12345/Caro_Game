@@ -19,3 +19,88 @@
  * TODO(S7): FIND_MATCH, CANCEL_MATCH (lobby.c).
  * TODO(S8): wrong field count or non-numeric field -> 400 bad_args, never crash.
  */
+/*
+ * server/protocol.c — protocol command dispatch.
+ * Owner: Hân.
+ *
+ * S0: command table and PING handler.
+ */
+#include "protocol.h"
+#include "net.h"
+
+#include <string.h>
+
+/* State permission masks. */
+#define STATE_BIT(s) (1U << (s))
+#define ALL_STATES (STATE_BIT(SESSION_CONNECTED) | \
+                   STATE_BIT(SESSION_LOBBY) | \
+                   STATE_BIT(SESSION_IN_QUEUE) | \
+                   STATE_BIT(SESSION_IN_GAME))
+
+typedef void (*CommandHandler)(Client *c, char *fields[], int nfields);
+
+typedef struct {
+    const char *name;
+    unsigned int states;
+    int min_fields;
+    int max_fields;
+    CommandHandler handler;
+} Command;
+
+/* S0 handler: PING -> 200|PING */
+static void handle_ping(Client *c, char *fields[], int nfields)
+{
+    (void)fields;
+    (void)nfields;
+
+    reply(c, 200, "PING", NULL);
+}
+
+/* S0: only PING is registered. */
+static const Command commands[] = {
+    { "PING", ALL_STATES, 1, 1, handle_ping }
+};
+
+void handle_message(Client *c, char *msg)
+{
+    if (c == NULL || msg == NULL || c->fd < 0)
+        return;
+
+    char *fields[MAX_FIELDS];
+    int nfields = msg_split(msg, fields, MAX_FIELDS);
+
+    if (nfields <= 0)
+        return;
+
+    const char *cmd_name = fields[0];
+
+    const Command *cmd = NULL;
+
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        if (strcmp(commands[i].name, cmd_name) == 0) {
+            cmd = &commands[i];
+            break;
+        }
+    }
+
+    if (cmd == NULL) {
+        reply(c, 400, cmd_name, "unknown_command");
+        return;
+    }
+
+    if (nfields < cmd->min_fields || nfields > cmd->max_fields) {
+        reply(c, 400, cmd->name, "bad_args");
+        return;
+    }
+
+    if (!(cmd->states & STATE_BIT(c->state))) {
+        if (c->state == SESSION_CONNECTED) {
+            reply(c, 401, cmd->name, "not_logged_in");
+        } else {
+            reply(c, 403, cmd->name, "forbidden_state");
+        }
+        return;
+    }
+
+    cmd->handler(c, fields, nfields);
+}
