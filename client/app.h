@@ -32,6 +32,9 @@ typedef struct {
     gboolean move_pending;                 /* MOVE sent, its response not received yet */
     int      pending_row, pending_col;
     gboolean ended;                        /* GAME_END received: the board is locked */
+    gboolean left;                         /* 200|LEAVE_GAME came before this game's GAME_END:
+                                              active is FALSE, we are in the lobby, and that
+                                              GAME_END only updates the ELO (ui_game.c) */
 } GameInfo;
 
 typedef struct {
@@ -60,10 +63,12 @@ void       ui_login_reset(const char *error);   /* unlock the form; error may be
 GtkWidget *ui_lobby_new(void);
 void       ui_lobby_enter(void);           /* called by app_show_page("lobby") */
 void       ui_lobby_reset(void);           /* session over: close its dialogs, empty the list */
+void       ui_lobby_update_bar(void);      /* redraw "name · ELO · W/L/D" from app */
+void       ui_lobby_request_stats(void);   /* STATS: the server's ELO and W/L/D -> app + bar */
 
 /* ui_game.c — page "game" */
 GtkWidget *ui_game_new(void);
 void       ui_game_enter(void);            /* called by app_show_page("game"): new board */
-void       ui_game_reset(void);            /* session over: close the result dialog */
+void       ui_game_reset(void);            /* session over: close every dialog of the page */
 
 #endif /* CARO_CLIENT_APP_H */

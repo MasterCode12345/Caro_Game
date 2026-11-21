@@ -16,8 +16,12 @@
  *
  * SIGPIPE: main() ignores it before anything is sent (CLAUDE.md "Platform notes").
  *
- * TODO(C4): losing the server on any page, also while a response is pending: close every
- *           dialog (net_on_lost -> app_go_login), never crash, never hang.
+ * LOSING THE SERVER — on any page, also while responses are pending
+ *   recv() returning 0 (server closed: FIN) or -1 (ECONNRESET...), a malformed frame, or a
+ *   failed send() all end in net_on_lost(): remove the watch, close the fd, then every waiting
+ *   callback gets RESP_DISCONNECTED (each one just returns, nothing is left locked), then
+ *   app_go_login() closes every dialog of every page and shows the login page with the error.
+ *   No step blocks, so the GUI never hangs; nothing touches the closed fd afterwards.
  */
 #include "net.h"
 

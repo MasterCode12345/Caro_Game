@@ -29,9 +29,22 @@
  *       build your own five to win. When it plays X it opens 0.5 s after GAME_START.
  *       Five in a row or a full board -> GAME_END (±16 ELO, 0 for a draw; the real server uses
  *       the §9 formula), then PLAYER_STATUS with the opponent's new ELO.
+ *   C4  RESIGN -> 200, GAME_END RESIGN. LEAVE_GAME -> 200, then (game still running) GAME_END
+ *       RESIGN — in that order, like the real server (§3) — and the opponent is IDLE again.
+ *       DRAW_OFFER -> 200; the fake opponent answers 2 s later, or before its next move if that
+ *       comes first: it DECLINES the first offer of each game and ACCEPTS the next ones
+ *       (GAME_END DRAW_AGREED). Any move cancels a pending offer, as in §6.3 step 7.
+ *       REMATCH (game ended) -> 200; 2 s later: the first request after each game is DECLINED,
+ *       the next one ACCEPTED (GAME_START, new gid, X and O swapped). 409 offer_pending while a
+ *       request is pending, 404 opponent_left after the opponent left.
+ *       STATS -> 200|STATS|me|elo|wins|losses|draws, counted from the fake games.
+ *       fake_simulate_opponent() (Ctrl+D/R/L/K/T on the game page, main.c): the opponent offers
+ *       a draw (DRAW_OFFERED), asks for a rematch (REMATCH_REQUESTED), leaves (running: GAME_END
+ *       RESIGN, then OPP_LEFT; ended: OPP_LEFT), disconnects (running: GAME_END DISCONNECT;
+ *       ended: OPP_LEFT; back online 5 s later), or the player to move runs out of time
+ *       (GAME_END TIMEOUT).
  *   anything else -> 400 unknown_command (not faked yet)
  *
- * TODO(C4): RESIGN, DRAW_OFFER/DRAW_REPLY, REMATCH/REMATCH_REPLY, LEAVE_GAME.
  * TODO(C5): HISTORY, REPLAY (one 20-move game), LEADERBOARD, FIND_MATCH / CANCEL_MATCH.
  */
 #include "fake.h"
@@ -49,6 +62,7 @@
 #define FAKE_MAX_INVITES    8
 #define FAKE_OPP_MOVE_MS    500      /* the fake opponent answers a move after 0.5 s */
 #define FAKE_ELO_DELTA      16
+#define FAKE_RECONNECT_MS   5000     /* a disconnected fake opponent is back online after 5 s */
 
 /* ---- outbox: messages and actions, delivered in due-time order ---------------------------------- */
 
@@ -243,6 +257,8 @@ static void clear_challenges(void)
 
 /* -- the game -- */
 
+typedef enum { BY_NONE, BY_ME, BY_OPP } OfferBy;   /* who made the pending draw/rematch offer */
+
 static struct {
     gboolean exists;         /* GAME_START sent (game running or ended) */
     gboolean running;
@@ -250,8 +266,13 @@ static struct {
     char     me_sym, turn;
     int      move_no;
     char     cells[BOARD_SIZE][BOARD_SIZE];
+    OfferBy  draw_by, rematch_by;
+    int      draw_asks, rematch_asks;     /* our offers in this game: the first is declined */
+    guint    draw_serial, rematch_serial; /* the offer a scheduled answer belongs to */
+    gboolean opp_left;                    /* the opponent left or disconnected */
 } game;
-static int me_elo = ELO_START;
+static int   me_elo = ELO_START, me_wins, me_losses, me_draws;
+static guint offer_serial;                /* never reset: a stale answer can never match */
 
 static const int DIRS[4][2] = { { 0, 1 }, { 1, 0 }, { 1, 1 }, { 1, -1 } };
 
@@ -309,9 +330,16 @@ static int line_if_played(int r, int c, char mark)
 static void end_game(char winner, const char *reason, int line[WIN_LENGTH][2], guint delay_ms)
 {
     game.running = FALSE;
+    game.draw_by = BY_NONE;
     int delta = winner == 0 ? 0 : winner == game.me_sym ? FAKE_ELO_DELTA : -FAKE_ELO_DELTA;
     me_elo += delta;
     players[game.opp].elo -= delta;
+    if (winner == 0)
+        me_draws++;
+    else if (winner == game.me_sym)
+        me_wins++;
+    else
+        me_losses++;
 
     GString *s = g_string_new(NULL);
     g_string_printf(s, "%s|%d|%s|%s|%d|", EV_GAME_END, game.gid,
@@ -340,11 +368,32 @@ static gboolean check_end(int r, int c, char sym, guint delay_ms)
     return TRUE;
 }
 
+/* The fake opponent answers our pending draw offer: the first of the game is declined. */
+static void opp_answer_draw(void)
+{
+    game.draw_by = BY_NONE;
+    if (game.draw_asks <= 1)
+        push_fmt(0, "%s|%d", EV_DRAW_DECLINED, game.gid);
+    else
+        end_game(0, END_DRAW_AGREED, NULL, 0);
+}
+
+static void act_opp_draw_answer(gpointer arg)
+{
+    if (game.running && game.draw_by == BY_ME && game.draw_serial == GPOINTER_TO_UINT(arg))
+        opp_answer_draw();
+}
+
 static void act_opp_move(gpointer arg)
 {
     char sym = other(game.me_sym);
     if (!game.running || game.gid != GPOINTER_TO_INT(arg) || game.turn != sym)
         return;
+    if (game.draw_by == BY_ME) {             /* a polite opponent answers before moving */
+        opp_answer_draw();
+        if (!game.running)
+            return;
+    }
     int best = 0, n_best = 0, pick_r = -1, pick_c = -1;
     for (int r = 0; r < BOARD_SIZE; r++) {
         for (int c = 0; c < BOARD_SIZE; c++) {
@@ -366,6 +415,7 @@ static void act_opp_move(gpointer arg)
     game.cells[pick_r][pick_c] = sym;
     game.move_no++;
     game.turn = game.me_sym;
+    game.draw_by = BY_NONE;                  /* a move cancels any pending draw offer */
     push_fmt(0, "%s|%d|%d|%d|%d", EV_OPP_MOVE, game.gid, pick_r, pick_c, game.move_no);
     check_end(pick_r, pick_c, sym, 0);
 }
@@ -461,6 +511,25 @@ static void act_invite_withdraw(gpointer arg)
     act_invite_end(arg, EV_CHALLENGE_CANCELLED);
 }
 
+static void act_opp_rematch_answer(gpointer arg)
+{
+    if (!game.exists || game.running || game.opp_left || game.rematch_by != BY_ME
+        || game.rematch_serial != GPOINTER_TO_UINT(arg))
+        return;
+    game.rematch_by = BY_NONE;
+    if (game.rematch_asks <= 1)
+        push_fmt(0, "%s|%d", EV_REMATCH_DECLINED, game.gid);
+    else
+        start_game(game.opp, other(game.me_sym), 0);   /* X and O swapped */
+}
+
+static void act_back_online(gpointer arg)
+{
+    int i = GPOINTER_TO_INT(arg);
+    if (has_status(i, PS_OFFLINE))
+        set_status(i, PS_IDLE, players[i].elo, 0);
+}
+
 /* ---- session ---------------------------------------------------------------------------------------- */
 
 void fake_start(void)
@@ -481,6 +550,7 @@ void fake_stop(void)
     memcpy(players, initial_players, sizeof players);
     memset(&game, 0, sizeof game);
     me_elo = ELO_START;
+    me_wins = me_losses = me_draws = 0;
     fstate = SESSION_CONNECTED;
     me[0] = '\0';
     script_started = FALSE;
@@ -531,7 +601,7 @@ static void fake_login(char **f, int n)
     } else {
         fstate = SESSION_LOBBY;
         g_strlcpy(me, f[1], sizeof me);
-        reply("%d|%s|%s|%d|%d|%d|%d", ST_OK, CMD_LOGIN, me, me_elo, 0, 0, 0);
+        reply("%d|%s|%s|%d|%d|%d|%d", ST_OK, CMD_LOGIN, me, me_elo, me_wins, me_losses, me_draws);
     }
 }
 
@@ -658,10 +728,202 @@ static void fake_move(char **f, int n)
         game.cells[r][c] = game.me_sym;
         game.move_no++;
         game.turn = other(game.me_sym);
+        game.draw_by = BY_NONE;                                  /* §6.3 step 7 */
         reply("%d|%s|%d", ST_OK, CMD_MOVE, game.move_no);        /* response first (§3) ... */
         if (!check_end(r, c, game.me_sym, FAKE_LATENCY_MS))      /* ... then GAME_END */
             later(FAKE_LATENCY_MS + FAKE_OPP_MOVE_MS, act_opp_move, GINT_TO_POINTER(game.gid));
     }
+}
+
+/* -- in a game (§6.3) -- */
+
+/* Checks shared by RESIGN, DRAW_*, REMATCH_*, LEAVE_GAME: state G, field count, the gid is our
+ * game (403 not_in_game otherwise) and, for the *_REPLY commands, ACCEPT or DECLINE. */
+static gboolean game_cmd_ok(const char *cmd, char **f, int n, gboolean has_answer, int *gid)
+{
+    if (!allowed(cmd, IN(SESSION_IN_GAME)))
+        return FALSE;
+    if (n != (has_answer ? 3 : 2) || !field_int(f[1], gid)
+        || (has_answer && strcmp(f[2], ARG_ACCEPT) != 0 && strcmp(f[2], ARG_DECLINE) != 0)) {
+        reply("%d|%s|%s", ST_BAD_REQUEST, cmd, ERR_BAD_ARGS);
+        return FALSE;
+    }
+    if (!game.exists || *gid != game.gid) {
+        reply("%d|%s|%s", ST_FORBIDDEN, cmd, ERR_NOT_IN_GAME);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void fake_resign(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_RESIGN, f, n, FALSE, &gid))
+        return;
+    if (!game.running) {
+        reply("%d|%s|%s", ST_GAME_NOT_ACTIVE, CMD_RESIGN, ERR_GAME_NOT_ACTIVE);
+        return;
+    }
+    reply("%d|%s", ST_OK, CMD_RESIGN);                           /* response first (§3) ... */
+    end_game(other(game.me_sym), END_RESIGN, NULL, FAKE_LATENCY_MS);   /* ... then GAME_END */
+}
+
+static void fake_draw_offer(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_DRAW_OFFER, f, n, FALSE, &gid))
+        return;
+    if (!game.running) {
+        reply("%d|%s|%s", ST_GAME_NOT_ACTIVE, CMD_DRAW_OFFER, ERR_GAME_NOT_ACTIVE);
+    } else if (game.draw_by != BY_NONE) {
+        reply("%d|%s|%s", ST_CONFLICT, CMD_DRAW_OFFER, ERR_OFFER_PENDING);
+    } else {
+        game.draw_by = BY_ME;
+        game.draw_asks++;
+        game.draw_serial = ++offer_serial;
+        reply("%d|%s", ST_OK, CMD_DRAW_OFFER);
+        later(FAKE_LATENCY_MS + FAKE_ANSWER_MS, act_opp_draw_answer,
+              GUINT_TO_POINTER(game.draw_serial));
+    }
+}
+
+static void fake_draw_reply(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_DRAW_REPLY, f, n, TRUE, &gid))
+        return;
+    if (!game.running) {
+        reply("%d|%s|%s", ST_GAME_NOT_ACTIVE, CMD_DRAW_REPLY, ERR_GAME_NOT_ACTIVE);
+    } else if (game.draw_by != BY_OPP) {
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_DRAW_REPLY, ERR_NO_PENDING_OFFER);
+    } else {
+        game.draw_by = BY_NONE;
+        reply("%d|%s", ST_OK, CMD_DRAW_REPLY);
+        if (strcmp(f[2], ARG_ACCEPT) == 0)
+            end_game(0, END_DRAW_AGREED, NULL, FAKE_LATENCY_MS);
+        /* DECLINE: the opponent would get DRAW_DECLINED; it is fake, nothing is sent to us */
+    }
+}
+
+static void fake_rematch(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_REMATCH, f, n, FALSE, &gid))
+        return;
+    if (game.running) {
+        reply("%d|%s|%s", ST_FORBIDDEN, CMD_REMATCH, ERR_FORBIDDEN_STATE);
+    } else if (game.opp_left) {
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_REMATCH, ERR_OPPONENT_LEFT);
+    } else if (game.rematch_by != BY_NONE) {
+        reply("%d|%s|%s", ST_CONFLICT, CMD_REMATCH, ERR_OFFER_PENDING);
+    } else {
+        game.rematch_by = BY_ME;
+        game.rematch_asks++;
+        game.rematch_serial = ++offer_serial;
+        reply("%d|%s", ST_OK, CMD_REMATCH);
+        later(FAKE_LATENCY_MS + FAKE_ANSWER_MS, act_opp_rematch_answer,
+              GUINT_TO_POINTER(game.rematch_serial));
+    }
+}
+
+static void fake_rematch_reply(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_REMATCH_REPLY, f, n, TRUE, &gid))
+        return;
+    if (game.running) {
+        reply("%d|%s|%s", ST_FORBIDDEN, CMD_REMATCH_REPLY, ERR_FORBIDDEN_STATE);
+    } else if (game.opp_left) {
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_REMATCH_REPLY, ERR_OPPONENT_LEFT);
+    } else if (game.rematch_by != BY_OPP) {
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_REMATCH_REPLY, ERR_NO_PENDING_OFFER);
+    } else {
+        game.rematch_by = BY_NONE;
+        reply("%d|%s", ST_OK, CMD_REMATCH_REPLY);
+        if (strcmp(f[2], ARG_ACCEPT) == 0)
+            start_game(game.opp, other(game.me_sym), FAKE_LATENCY_MS);   /* X and O swapped */
+    }
+}
+
+static void fake_leave_game(char **f, int n)
+{
+    int gid;
+    if (!game_cmd_ok(CMD_LEAVE_GAME, f, n, FALSE, &gid))
+        return;
+    reply("%d|%s", ST_OK, CMD_LEAVE_GAME);              /* the 200 first, as on the real server */
+    if (game.running)                                   /* leaving a running game = resigning */
+        end_game(other(game.me_sym), END_RESIGN, NULL, FAKE_LATENCY_MS);
+    if (!game.opp_left)                                 /* would get OPP_LEFT; back in the lobby */
+        set_status(game.opp, PS_IDLE, players[game.opp].elo, FAKE_LATENCY_MS);
+    game.exists = game.running = FALSE;
+    fstate = SESSION_LOBBY;
+}
+
+static void fake_stats(char **f, int n)
+{
+    if (!allowed(CMD_STATS, IN(SESSION_LOBBY) | IN(SESSION_IN_QUEUE)))
+        return;
+    int i;
+    if (n == 1 || (n == 2 && strcmp(f[1], me) == 0))
+        reply("%d|%s|%s|%d|%d|%d|%d", ST_OK, CMD_STATS, me, me_elo, me_wins, me_losses, me_draws);
+    else if (n != 2)
+        reply("%d|%s|%s", ST_BAD_REQUEST, CMD_STATS, ERR_BAD_ARGS);
+    else if ((i = find_player(f[1])) < 0)
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_STATS, ERR_USER_NOT_FOUND);
+    else                                     /* the fake players have no recorded games */
+        reply("%d|%s|%s|%d|0|0|0", ST_OK, CMD_STATS, players[i].name, players[i].elo);
+}
+
+/* The opponent is gone (left or disconnected): no rematch any more. */
+static void opp_gone(const char *status)
+{
+    game.opp_left = TRUE;
+    game.rematch_by = BY_NONE;
+    set_status(game.opp, status, players[game.opp].elo, 0);
+}
+
+gboolean fake_simulate_opponent(FakeOpponentAction action)
+{
+    if (fstate != SESSION_IN_GAME || !game.exists)
+        return FALSE;
+    switch (action) {
+    case FAKE_OPP_DRAW_OFFER:
+        if (!game.running || game.draw_by != BY_NONE)
+            return FALSE;
+        game.draw_by = BY_OPP;
+        push_fmt(0, "%s|%d", EV_DRAW_OFFERED, game.gid);
+        return TRUE;
+    case FAKE_OPP_REMATCH:
+        if (game.running || game.opp_left || game.rematch_by != BY_NONE)
+            return FALSE;
+        game.rematch_by = BY_OPP;
+        push_fmt(0, "%s|%d", EV_REMATCH_REQUESTED, game.gid);
+        return TRUE;
+    case FAKE_OPP_LEAVE:                     /* the opponent's LEAVE_GAME (§6.3) */
+        if (game.opp_left)
+            return FALSE;
+        if (game.running)
+            end_game(game.me_sym, END_RESIGN, NULL, 0);
+        push_fmt(0, "%s|%d", EV_OPP_LEFT, game.gid);
+        opp_gone(PS_IDLE);
+        return TRUE;
+    case FAKE_OPP_DISCONNECT:                /* the opponent's session_end (§8) */
+        if (game.opp_left)
+            return FALSE;
+        if (game.running)
+            end_game(game.me_sym, END_DISCONNECT, NULL, 0);
+        else
+            push_fmt(0, "%s|%d", EV_OPP_LEFT, game.gid);
+        opp_gone(PS_OFFLINE);
+        later(FAKE_RECONNECT_MS, act_back_online, GINT_TO_POINTER(game.opp));
+        return TRUE;
+    case FAKE_TIMEOUT:                       /* the player to move loses (§8) */
+        if (!game.running)
+            return FALSE;
+        end_game(other(game.turn), END_TIMEOUT, NULL, 0);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 gboolean fake_simulate_invite(gboolean withdraw)
@@ -713,6 +975,20 @@ void fake_handle(const char *payload)
         fake_challenge_reply(f, n);
     else if (strcmp(cmd, CMD_MOVE) == 0)
         fake_move(f, n);
+    else if (strcmp(cmd, CMD_RESIGN) == 0)
+        fake_resign(f, n);
+    else if (strcmp(cmd, CMD_DRAW_OFFER) == 0)
+        fake_draw_offer(f, n);
+    else if (strcmp(cmd, CMD_DRAW_REPLY) == 0)
+        fake_draw_reply(f, n);
+    else if (strcmp(cmd, CMD_REMATCH) == 0)
+        fake_rematch(f, n);
+    else if (strcmp(cmd, CMD_REMATCH_REPLY) == 0)
+        fake_rematch_reply(f, n);
+    else if (strcmp(cmd, CMD_LEAVE_GAME) == 0)
+        fake_leave_game(f, n);
+    else if (strcmp(cmd, CMD_STATS) == 0)
+        fake_stats(f, n);
     else
         reply("%d|%s|%s", ST_BAD_REQUEST, cmd, ERR_UNKNOWN_COMMAND);
 

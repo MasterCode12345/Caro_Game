@@ -10,8 +10,10 @@
  * gtk_init() + gtk_main() instead of GtkApplication: GtkApplication is single-instance by
  * default, and we run two clients on one machine for testing.
  *
- * TODO(C3–C5): real game and history pages; each registers its events with dispatch_on().
- * TODO(C4): on a lost connection, also close every open dialog.
+ * Losing the server (net_on_lost) ends in app_go_login(): every page's reset function closes
+ * its own dialogs first, so no dialog outlives the session.
+ *
+ * TODO(C5): real history page; it registers its events with dispatch_on().
  * TODO(C6): minimum window size.
  */
 #include <signal.h>
@@ -67,22 +69,41 @@ void app_go_login(const char *error)
     app_show_page("login");
 }
 
-/* Offline-mode test keys, lobby page only: Ctrl+I = receive a fake invitation,
- * Ctrl+U = one that the inviter withdraws after 5 s (Cmd also works on macOS). */
+/* Offline-mode test keys (Cmd also works on macOS).
+ *   lobby page: Ctrl+I = receive a fake invitation, Ctrl+U = one withdrawn after 5 s.
+ *   game page:  Ctrl+D the opponent offers a draw, Ctrl+R asks for a rematch, Ctrl+L leaves,
+ *               Ctrl+K disconnects, Ctrl+T the player to move runs out of time. */
+static gboolean game_key_action(guint key, FakeOpponentAction *action)
+{
+    switch (key) {
+    case GDK_KEY_d: *action = FAKE_OPP_DRAW_OFFER; return TRUE;
+    case GDK_KEY_r: *action = FAKE_OPP_REMATCH;    return TRUE;
+    case GDK_KEY_l: *action = FAKE_OPP_LEAVE;      return TRUE;
+    case GDK_KEY_k: *action = FAKE_OPP_DISCONNECT; return TRUE;
+    case GDK_KEY_t: *action = FAKE_TIMEOUT;        return TRUE;
+    default:        return FALSE;
+    }
+}
+
 static gboolean on_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
 {
     (void)w;
     (void)data;
     GdkModifierType mods = ev->state & gtk_accelerator_get_default_mod_mask();
     const char *page = gtk_stack_get_visible_child_name(app.stack);
-    if ((mods != GDK_CONTROL_MASK && mods != GDK_META_MASK) || page == NULL
-        || strcmp(page, "lobby") != 0)
+    if ((mods != GDK_CONTROL_MASK && mods != GDK_META_MASK) || page == NULL)
         return FALSE;
     guint key = gdk_keyval_to_lower(ev->keyval);
-    if (key != GDK_KEY_i && key != GDK_KEY_u)
+    FakeOpponentAction action;
+    if (strcmp(page, "lobby") == 0 && (key == GDK_KEY_i || key == GDK_KEY_u)) {
+        if (!fake_simulate_invite(key == GDK_KEY_u))
+            g_printerr("caro_client: fake: nobody idle can invite you right now\n");
+    } else if (strcmp(page, "game") == 0 && game_key_action(key, &action)) {
+        if (!fake_simulate_opponent(action))
+            g_printerr("caro_client: fake: not possible at this point of the game\n");
+    } else {
         return FALSE;
-    if (!fake_simulate_invite(key == GDK_KEY_u))
-        g_printerr("caro_client: fake: nobody idle can invite you right now\n");
+    }
     return TRUE;
 }
 

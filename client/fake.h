@@ -19,4 +19,15 @@ guint fake_push(guint delay_ms, const char *msg);
  * withdraw: the inviter cancels it after 5 s. FALSE if not in the lobby or nobody is idle. */
 gboolean fake_simulate_invite(gboolean withdraw);
 
+/* Test hook (Ctrl+D/R/L/K/T on the game page, main.c): the fake opponent or the fake server
+ * does something on its own. FALSE if it makes no sense now (e.g. a draw offer after the end). */
+typedef enum {
+    FAKE_OPP_DRAW_OFFER,     /* DRAW_OFFERED (game running, no offer pending) */
+    FAKE_OPP_REMATCH,        /* REMATCH_REQUESTED (game ended, opponent still there) */
+    FAKE_OPP_LEAVE,          /* LEAVE_GAME: running -> GAME_END RESIGN + OPP_LEFT; ended -> OPP_LEFT */
+    FAKE_OPP_DISCONNECT,     /* lost connection: running -> GAME_END DISCONNECT; ended -> OPP_LEFT */
+    FAKE_TIMEOUT             /* the player to move runs out of time: GAME_END TIMEOUT */
+} FakeOpponentAction;
+gboolean fake_simulate_opponent(FakeOpponentAction action);
+
 #endif /* CARO_CLIENT_FAKE_H */

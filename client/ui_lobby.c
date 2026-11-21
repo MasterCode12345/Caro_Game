@@ -20,7 +20,12 @@
  *   nested main loop, and code that thinks it waits for the user would then see network events
  *   (even GAME_START) happen "inside" it.
  *
- * TODO(C4): after LEAVE_GAME: back here, LIST_PLAYERS again, refresh the ELO bar.
+ * BACK FROM A GAME (ui_game.c, after 200|LEAVE_GAME)
+ *   app_show_page("lobby") sends LIST_PLAYERS again (the list was not kept up to date while we
+ *   played), then ui_lobby_request_stats() sends STATS. The top bar is redrawn from the STATS
+ *   response: the client never adds or subtracts ELO or wins itself, the server's database is
+ *   the reference. If we left a running game, its GAME_END arrives after the 200 (§3), while
+ *   we are already here: ui_game.c then only updates app.elo and calls ui_lobby_update_bar().
  * TODO(C5): "Lịch sử" button; "Bảng xếp hạng" (LEADERBOARD|10 dialog, own row in bold);
  *           "Tìm trận nhanh" (FIND_MATCH -> "searching" dialog with Cancel = CANCEL_MATCH;
  *           GAME_START closes it).
@@ -492,7 +497,9 @@ static void close_all_dialogs(void)
     g_hash_table_remove_all(invites);
 }
 
-/* GAME_START|gid|size|your_symbol|opponent|opp_elo|sec_per_move — to both players */
+/* GAME_START|gid|size|your_symbol|opponent|opp_elo|sec_per_move — to both players.
+ * Also arrives on the game page after an accepted rematch: the same code starts the new game
+ * (new gid, symbols swapped), and ui_game_enter() clears the board. */
 static void on_game_start(char **f, int n)
 {
     int gid, size, opp_elo, sec;
@@ -546,13 +553,47 @@ static void on_logout_clicked(GtkWidget *w, gpointer data)
 
 /* ---- page ------------------------------------------------------------------------------------------ */
 
-void ui_lobby_enter(void)
+void ui_lobby_update_bar(void)
 {
     char *markup = g_markup_printf_escaped(
         "<span size='large'><b>%s</b></span>   ·   ELO %d   ·   Thắng/Thua/Hòa %d/%d/%d",
         app.username, app.elo, app.wins, app.losses, app.draws);
     gtk_label_set_markup(GTK_LABEL(l_user), markup);
     g_free(markup);
+}
+
+/* 200|STATS|user|elo|wins|losses|draws — our own numbers, straight from the server's DB */
+static void on_stats_reply(int code, char **f, int n, gpointer data)
+{
+    (void)data;
+    if (code == RESP_DISCONNECTED)
+        return;
+    int elo, wins, losses, draws;
+    if (code != ST_OK) {
+        notice(NOTE_ERROR, "Không lấy được ELO và thành tích từ server (%d %s)", code,
+               n >= 3 ? f[2] : "");
+        return;
+    }
+    if (n < 7 || strcmp(f[2], app.username) != 0 || !field_int(f[3], &elo)
+        || !field_int(f[4], &wins) || !field_int(f[5], &losses) || !field_int(f[6], &draws)) {
+        notice(NOTE_ERROR, "Server trả về phản hồi STATS không hợp lệ");
+        return;
+    }
+    app.elo = elo;
+    app.wins = wins;
+    app.losses = losses;
+    app.draws = draws;
+    ui_lobby_update_bar();
+}
+
+void ui_lobby_request_stats(void)
+{
+    net_request(CMD_STATS, on_stats_reply, NULL);     /* no argument = the caller's own stats */
+}
+
+void ui_lobby_enter(void)
+{
+    ui_lobby_update_bar();
     gtk_widget_set_sensitive(b_logout, TRUE);
     notice_clear();
 

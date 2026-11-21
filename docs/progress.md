@@ -92,3 +92,18 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   forbidden-state requests. `make` clean (zero warnings).
 - 2026-11-21 · Nghĩa + Hân · M0 and M1 reached with Hân's real server: PING, REGISTER, LOGIN,
   wrong password -> 401 and duplicate login -> 409 shown, tested with two GTK client windows.
+- 2026-11-21 · Nghĩa · C4 code: game page buttons Xin thua (confirm -> RESIGN), Cầu hòa
+  (DRAW_OFFER; SENDING/PENDING so a move cancels only an offer the server already holds), Đấu lại
+  (only after GAME_END -> REMATCH), Về sảnh (LEAVE_GAME, confirm while the game runs);
+  DRAW_OFFERED / REMATCH_REQUESTED Accept/Decline dialogs, DRAW_DECLINED / REMATCH_DECLINED
+  notices, OPP_LEFT (and a DISCONNECT win) disables Đấu lại, rematch GAME_START clears the board
+  with swapped symbols; end reason kept in the side panel. After 200|LEAVE_GAME: lobby,
+  LIST_PLAYERS, then STATS sets ELO and W/L/D (no client-side counting); the later GAME_END of a
+  left game only updates the ELO; events with another gid are ignored. Lost server on any page
+  closes every dialog. Fake: RESIGN, DRAW_*, REMATCH_*, LEAVE_GAME (200 before GAME_END), STATS;
+  Ctrl+D/R/L/K/T on the game page. Headless under ASan/UBSan: 146 checks (14 fake games: every
+  button, every end reason, 409/404 paths, old-gid events, lost connection with dialogs open and
+  requests pending on login/lobby/game; a TCP mock server SIGKILLed in the lobby, in a game with
+  2 requests pending and with LOGIN pending; LEAVE 200 then GAME_END 0.4 s later) + rendered
+  PNGs checked. C4 not ticked yet: waits for the GUI click-through in fake mode. STATS needs the
+  server's handler (S6): until then the lobby shows an error notice after a game.

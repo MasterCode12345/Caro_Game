@@ -1,5 +1,5 @@
 /*
- * client/ui_game.c — page "game": board, turn, result (docs/protocol.md §6.3, §7).
+ * client/ui_game.c — page "game": board, turn, controls, result (docs/protocol.md §6.3, §7, §8).
  * Owner: Nghĩa.
  *
  * THE SERVER DECIDES — why a click does not draw a mark
@@ -11,11 +11,32 @@
  *   time the two players would see different boards. Drawing only what the server confirmed
  *   keeps both boards identical: every mark on screen comes from 200|MOVE or OPP_MOVE.
  *
- * TODO(C4): buttons Xin thua (confirm -> RESIGN), Cầu hòa (DRAW_OFFER), Đấu lại (after GAME_END
- *           -> REMATCH), Về sảnh (LEAVE_GAME, confirm if the game is still running).
- * TODO(C4): DRAW_OFFERED / REMATCH_REQUESTED -> Accept/Decline dialogs; DRAW_DECLINED /
- *           REMATCH_DECLINED -> notice; GAME_START here (rematch) -> clear board, new symbol;
- *           OPP_LEFT -> "Đối thủ đã rời", disable Đấu lại.
+ * CONTROLS — same rule: a button only sends a request, the result comes from the server.
+ *   Xin thua  confirm -> RESIGN|gid -> 200, then GAME_END (RESIGN) to both
+ *   Cầu hòa   DRAW_OFFER|gid -> 200; the opponent answers: GAME_END (DRAW_AGREED) or
+ *             DRAW_DECLINED. The next move, by either player, cancels the offer (§6.3 step 7).
+ *   Đấu lại   only after GAME_END: REMATCH|gid -> 200; then GAME_START (new gid, X and O
+ *             swapped) or REMATCH_DECLINED. After OPP_LEFT it can never be accepted.
+ *   Về sảnh   LEAVE_GAME|gid; if the game is still running, confirm first: it counts as a loss.
+ *   The opponent's DRAW_OFFERED / REMATCH_REQUESTED open an Accept/Decline dialog (DRAW_REPLY,
+ *   REMATCH_REPLY). Every button is locked while its request waits for the response.
+ *
+ * WHY OUR DRAW OFFER HAS TWO STATES (SENDING, PENDING)
+ *   A move cancels the offer at the server. Responses to our requests and events caused by the
+ *   opponent reach us in the order the server handled them (one TCP stream, §3), so:
+ *     opponent moved BEFORE the server got our offer: OPP_MOVE arrives while SENDING -> the
+ *       offer is still alive (its 200 comes next);
+ *     opponent moved AFTER: 200 came first (PENDING), then OPP_MOVE -> the offer is gone.
+ *   One flag could not tell these apart.
+ *
+ * LEAVING A RUNNING GAME
+ *   The server answers 200|LEAVE_GAME first and only then sends GAME_END of that game (§3:
+ *   the response before the events). We switch to the lobby on the 200, so the GAME_END finds
+ *   us there: app.game.left marks that game and its GAME_END only updates the ELO, it never
+ *   opens the game page again. The lobby then sends LIST_PLAYERS and STATS; the ELO and
+ *   W/L/D shown there come from the server, the client never adds or subtracts itself.
+ *   Every event whose gid is not the game on screen (OPP_MOVE, DRAW_OFFERED, ...) is ignored.
+ *
  * TODO(C5): countdown of the current move (g_timeout_add_seconds 1), reset after every move;
  *           display only, the server decides TIMEOUT.
  */
@@ -29,14 +50,41 @@
 #include "dispatch.h"
 #include "net.h"
 
+/* Side panel width. A wrapping GtkLabel asks for its whole text on one line as natural width,
+ * which would widen the panel and shrink the board: wrapping labels get a max width in chars. */
+#define SIDE_WIDTH       250
+#define SIDE_WRAP_CHARS  30
+
 static BoardView *bv;
 static GtkWidget *l_title, *l_me, *l_opp, *l_turn, *l_moves, *l_notice;
-static GtkWidget *result_dialog;
+static GtkWidget *b_resign, *b_draw, *b_rematch, *b_leave;
+
+/* At most one of each. Every dialog uses the "response" signal, never gtk_dialog_run(). */
+static GtkWidget *result_dialog;     /* GAME_END: who won, why, new ELO */
+static GtkWidget *confirm_dialog;    /* "xin thua?" or "rời ván đang chơi?" */
+static GtkWidget *draw_dialog;       /* DRAW_OFFERED: Accept / Decline */
+static GtkWidget *rematch_dialog;    /* REMATCH_REQUESTED: Accept / Decline */
+
 static struct {
     gboolean known;            /* GAME_END received for the current game */
     int      elo_before, new_elo, delta;
     char     outcome;          /* 'W' win, 'L' loss, 'D' draw */
+    char     reason[24];       /* END_FIVE, END_RESIGN, ... as received */
 } end;
+
+typedef enum { OFFER_NONE, OFFER_SENDING, OFFER_PENDING } OfferState;
+
+static struct {
+    gboolean   resign_sent;    /* RESIGN sent: wait for GAME_END */
+    OfferState draw;           /* our draw offer */
+    OfferState rematch;        /* our rematch request */
+    gboolean   accepting;      /* DRAW_REPLY / REMATCH_REPLY ACCEPT sent: wait for GAME_END /
+                                  GAME_START */
+    gboolean   leaving;        /* LEAVE_GAME sent: wait for its response */
+    gboolean   opp_left;       /* OPP_LEFT, or the opponent disconnected: no rematch possible */
+} ctl;
+
+enum { CONFIRM_RESIGN = 1, CONFIRM_LEAVE };
 
 /* ---- helpers ------------------------------------------------------------------------------------- */
 
@@ -59,17 +107,25 @@ static void fmt_delta(char *buf, size_t len, int d)
         snprintf(buf, len, "%+d", d);
 }
 
-static void notice(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
-static void notice(const char *fmt, ...)
+typedef enum { NOTE_INFO, NOTE_ERROR } NoteKind;
+
+static void notice(NoteKind kind, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+static void notice(NoteKind kind, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
     char *text = g_strdup_vprintf(fmt, ap);
     va_end(ap);
-    char *markup = g_markup_printf_escaped("<span foreground='#c01c28'>%s</span>", text);
+    char *markup = g_markup_printf_escaped("<span foreground='%s'>%s</span>",
+                                           kind == NOTE_ERROR ? "#c01c28" : "#1c71d8", text);
     gtk_label_set_markup(GTK_LABEL(l_notice), markup);
     g_free(markup);
     g_free(text);
+}
+
+static void notice_clear(void)
+{
+    gtk_label_set_text(GTK_LABEL(l_notice), "");
 }
 
 /* "7,11" -> 7, 11 (in place) */
@@ -82,6 +138,111 @@ static gboolean parse_rc(char *s, int *r, int *c)
     gboolean ok = field_int(s, r) && field_int(comma + 1, c);
     *comma = ITEM_SEP;
     return ok;
+}
+
+/* A response to a request sent for game `data` (GINT_TO_POINTER(gid)) that still concerns the
+ * game on screen. FALSE when the connection is gone (net.c already went back to login) or when
+ * another game started meanwhile. */
+static gboolean reply_is_current(int code, gpointer data)
+{
+    return code != RESP_DISCONNECTED && app.game.active && app.game.gid == GPOINTER_TO_INT(data);
+}
+
+/* "EVENT|gid": TRUE if it is about the game on screen; events of any other gid are ignored. */
+static gboolean event_is_current(char **f, int n)
+{
+    int gid;
+    if (n < 2 || !field_int(f[1], &gid)) {
+        g_printerr("caro_client: warning: bad %s ignored\n", f[0]);
+        return FALSE;
+    }
+    return app.game.active && gid == app.game.gid;
+}
+
+/* Sends "CMD|gid" for the game on screen; the callback gets the gid back as user_data. */
+static gboolean send_game_cmd(const char *cmd, ResponseCb cb)
+{
+    char *payload = g_strdup_printf("%s|%d", cmd, app.game.gid);
+    gboolean ok = net_request(payload, cb, GINT_TO_POINTER(app.game.gid));
+    g_free(payload);
+    return ok;
+}
+
+/* Error response of RESIGN / DRAW_* / REMATCH_* / LEAVE_GAME -> "Không <what> được: <why>". */
+static void error_notice(const char *what, int code, char **f, int n)
+{
+    static const struct { const char *token, *text; } table[] = {
+        { ERR_GAME_NOT_ACTIVE,  "ván đã kết thúc" },
+        { ERR_NOT_IN_GAME,      "bạn không ở trong ván này" },
+        { ERR_FORBIDDEN_STATE,  "không thể làm việc này lúc này" },
+        { ERR_OFFER_PENDING,    "đang có một lời đề nghị chưa được trả lời" },
+        { ERR_NO_PENDING_OFFER, "lời đề nghị không còn hiệu lực" },
+        { ERR_OPPONENT_LEFT,    "đối thủ đã rời ván" },
+        { ERR_BAD_ARGS,         "yêu cầu không hợp lệ" },
+        { ERR_SERVER_ERROR,     "lỗi phía server" },
+    };
+    const char *reason = n >= 3 ? f[2] : "";
+    for (size_t i = 0; i < G_N_ELEMENTS(table); i++) {
+        if (strcmp(reason, table[i].token) == 0) {
+            notice(NOTE_ERROR, "Không %s được: %s", what, table[i].text);
+            return;
+        }
+    }
+    if (code == ST_GAME_NOT_ACTIVE)
+        notice(NOTE_ERROR, "Không %s được: ván đã kết thúc", what);
+    else
+        notice(NOTE_ERROR, "Không %s được (%d %s)", what, code, reason);
+}
+
+/* ---- dialogs -------------------------------------------------------------------------------------- */
+
+static void close_dialog(GtkWidget **slot)
+{
+    GtkWidget *d = *slot;
+    if (d != NULL) {
+        *slot = NULL;                    /* first: nothing may use it while it is destroyed */
+        gtk_widget_destroy(d);
+    }
+}
+
+/* In a "response" handler: forget the dialog, then destroy it. */
+static void dialog_done(GtkWidget **slot, GtkDialog *dialog)
+{
+    if (*slot == GTK_WIDGET(dialog))
+        *slot = NULL;
+    gtk_widget_destroy(GTK_WIDGET(dialog));
+}
+
+static void close_all_dialogs(void)
+{
+    close_dialog(&result_dialog);
+    close_dialog(&confirm_dialog);
+    close_dialog(&draw_dialog);
+    close_dialog(&rematch_dialog);
+}
+
+/* Question dialog with a "no" (REJECT) and a "yes" (ACCEPT) button; the gid travels with it so
+ * that a late answer can be recognised as belonging to an older game. */
+static GtkWidget *question_dialog(const char *title, const char *detail, const char *no_label,
+                                  const char *yes_label, gboolean yes_is_default,
+                                  GCallback on_response, gpointer data)
+{
+    GtkWidget *d = gtk_message_dialog_new(app.window, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                          GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "%s", title);
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(d), "%s", detail);
+    gtk_dialog_add_button(GTK_DIALOG(d), no_label, GTK_RESPONSE_REJECT);
+    gtk_dialog_add_button(GTK_DIALOG(d), yes_label, GTK_RESPONSE_ACCEPT);
+    gtk_dialog_set_default_response(GTK_DIALOG(d),
+                                    yes_is_default ? GTK_RESPONSE_ACCEPT : GTK_RESPONSE_REJECT);
+    g_object_set_data(G_OBJECT(d), "gid", GINT_TO_POINTER(app.game.gid));
+    g_signal_connect(d, "response", on_response, data);
+    gtk_widget_show_all(d);
+    return d;
+}
+
+static int dialog_gid(GtkDialog *dialog)
+{
+    return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(dialog), "gid"));
 }
 
 /* ---- side panel ------------------------------------------------------------------------------------ */
@@ -104,6 +265,39 @@ static void set_player(GtkWidget *label, gboolean to_move, char sym, const char 
     g_free(esc);
 }
 
+static const char *end_reason_text(const char *reason, char outcome)
+{
+    gboolean won = outcome == 'W';
+    if (strcmp(reason, END_FIVE) == 0)
+        return won ? "Bạn có 5 quân liên tiếp" : "Đối thủ có 5 quân liên tiếp";
+    if (strcmp(reason, END_BOARD_FULL) == 0)
+        return "Bàn cờ đã kín mà không ai có 5 quân liên tiếp";
+    if (strcmp(reason, END_RESIGN) == 0)
+        return won ? "Đối thủ xin thua" : "Bạn xin thua";
+    if (strcmp(reason, END_DRAW_AGREED) == 0)
+        return "Hai bên đồng ý hòa";
+    if (strcmp(reason, END_TIMEOUT) == 0)
+        return won ? "Đối thủ hết thời gian suy nghĩ" : "Bạn hết thời gian suy nghĩ";
+    if (strcmp(reason, END_DISCONNECT) == 0)
+        return won ? "Đối thủ mất kết nối" : "Bạn mất kết nối";
+    return reason;
+}
+
+static void update_buttons(void)
+{
+    const GameInfo *g = &app.game;
+    gboolean on = g->active && !ctl.leaving;
+    gboolean running = on && !g->ended && !ctl.accepting;
+    gtk_widget_set_sensitive(b_resign, running && !ctl.resign_sent);
+    gtk_widget_set_sensitive(b_draw, running && !ctl.resign_sent && ctl.draw == OFFER_NONE
+                                     && draw_dialog == NULL);
+    gtk_widget_set_sensitive(b_rematch, on && g->ended && !ctl.accepting && !ctl.opp_left
+                                        && ctl.rematch == OFFER_NONE && rematch_dialog == NULL);
+    /* Not while an ACCEPT waits: its GAME_END / GAME_START is a few milliseconds away, and a
+     * LEAVE_GAME for the old gid could reach the server after the new game started. */
+    gtk_widget_set_sensitive(b_leave, on && !ctl.accepting);
+}
+
 static void update_panel(void)
 {
     const GameInfo *g = &app.game;
@@ -122,18 +316,26 @@ static void update_panel(void)
     set_player(l_opp, opp_turn, opp_symbol(), g->opponent, g->opp_elo, end.known,
                g->opp_elo - end.delta);
 
-    const char *turn;
-    if (g->ended)
-        turn = end.outcome == 'W' ? "<span foreground='#26a269'><b>Bạn thắng</b></span>"
-             : end.outcome == 'L' ? "<span foreground='#c01c28'><b>Bạn thua</b></span>"
-                                  : "<b>Hòa</b>";
-    else if (g->move_pending)
-        turn = "<span foreground='#5e5c64'>Đang gửi nước đi…</span>";
-    else if (my_turn)
-        turn = "<span foreground='#26a269'><b>Lượt của bạn</b></span>";
-    else
-        turn = "<span foreground='#5e5c64'>Đợi đối thủ…</span>";
-    char *t = g_strdup_printf("<span size='x-large'>%s</span>", turn);
+    char *t;
+    if (g->ended) {                          /* result + why, kept after the dialog is closed */
+        const char *res = end.outcome == 'W' ? "<span foreground='#26a269'><b>Bạn thắng</b></span>"
+                        : end.outcome == 'L' ? "<span foreground='#c01c28'><b>Bạn thua</b></span>"
+                                             : "<b>Hòa</b>";
+        char *why = g_markup_escape_text(end_reason_text(end.reason, end.outcome), -1);
+        t = g_strdup_printf("<span size='x-large'>%s</span>\n%s", res, why);
+        g_free(why);
+    } else {
+        const char *turn;
+        if (ctl.leaving)
+            turn = "<span foreground='#5e5c64'>Đang rời ván…</span>";
+        else if (g->move_pending)
+            turn = "<span foreground='#5e5c64'>Đang gửi nước đi…</span>";
+        else if (my_turn)
+            turn = "<span foreground='#26a269'><b>Lượt của bạn</b></span>";
+        else
+            turn = "<span foreground='#5e5c64'>Đợi đối thủ…</span>";
+        t = g_strdup_printf("<span size='x-large'>%s</span>", turn);
+    }
     gtk_label_set_markup(GTK_LABEL(l_turn), t);
     g_free(t);
 
@@ -141,7 +343,22 @@ static void update_panel(void)
     snprintf(moves, sizeof moves, "Số nước đã đi: %d", g->move_no);
     gtk_label_set_text(GTK_LABEL(l_moves), moves);
 
-    board_view_set_interactive(bv, my_turn && !g->move_pending);
+    board_view_set_interactive(bv, g->active && my_turn && !g->move_pending && !ctl.leaving
+                                   && !ctl.resign_sent && !ctl.accepting);
+    update_buttons();
+}
+
+/* §6.3 step 7: a move, ours or the opponent's, cancels any pending draw offer. */
+static void move_cancels_draw_offers(void)
+{
+    if (ctl.draw == OFFER_PENDING) {
+        ctl.draw = OFFER_NONE;
+        notice(NOTE_INFO, "Lời cầu hòa của bạn hết hiệu lực vì đã có nước đi mới");
+    }
+    if (draw_dialog != NULL) {
+        close_dialog(&draw_dialog);
+        notice(NOTE_INFO, "Lời cầu hòa của đối thủ hết hiệu lực vì đã có nước đi mới");
+    }
 }
 
 /* ---- my move ------------------------------------------------------------------------------------------ */
@@ -163,7 +380,7 @@ static const char *move_error_text(int code)
 static void on_move_reply(int code, char **f, int n, gpointer data)
 {
     GameInfo *g = &app.game;
-    if (code == RESP_DISCONNECTED || !g->active || g->gid != GPOINTER_TO_INT(data))
+    if (!reply_is_current(code, data))
         return;                              /* connection gone, or an older game */
     g->move_pending = FALSE;
 
@@ -173,12 +390,13 @@ static void on_move_reply(int code, char **f, int n, gpointer data)
         board_view_set_last(bv, g->pending_row, g->pending_col);
         g->move_no = n >= 3 && field_int(f[2], &move_no) ? move_no : g->move_no + 1;
         g->turn = opp_symbol();
+        move_cancels_draw_offers();
     } else if (!g->ended) {                  /* after GAME_END a refused move needs no message */
         const char *text = move_error_text(code);
         if (text != NULL)
-            notice("%s", text);
+            notice(NOTE_ERROR, "%s", text);
         else
-            notice("Nước đi bị từ chối (%d %s)", code, n >= 3 ? f[2] : "");
+            notice(NOTE_ERROR, "Nước đi bị từ chối (%d %s)", code, n >= 3 ? f[2] : "");
     }
     update_panel();
 }
@@ -187,8 +405,8 @@ static void on_cell(int row, int col, gpointer data)
 {
     (void)data;
     GameInfo *g = &app.game;
-    if (!g->active || g->ended || g->move_pending || g->turn != g->my_symbol
-        || board_view_get(bv, row, col) != '.')
+    if (!g->active || g->ended || g->move_pending || g->turn != g->my_symbol || ctl.leaving
+        || ctl.resign_sent || ctl.accepting || board_view_get(bv, row, col) != '.')
         return;
 
     char *payload = g_strdup_printf("%s|%d|%d|%d", CMD_MOVE, g->gid, row, col);
@@ -196,13 +414,298 @@ static void on_cell(int row, int col, gpointer data)
         g->move_pending = TRUE;              /* locked until the server answers */
         g->pending_row = row;
         g->pending_col = col;
-        gtk_label_set_text(GTK_LABEL(l_notice), "");
+        notice_clear();
         update_panel();
     }
     g_free(payload);
 }
 
-/* ---- events ---------------------------------------------------------------------------------------------- */
+/* ---- Xin thua ------------------------------------------------------------------------------------------ */
+
+static void on_resign_reply(int code, char **f, int n, gpointer data)
+{
+    if (!reply_is_current(code, data) || code == ST_OK)
+        return;                              /* 200: GAME_END (RESIGN) follows */
+    ctl.resign_sent = FALSE;
+    if (!app.game.ended)
+        error_notice("xin thua", code, f, n);
+    update_panel();
+}
+
+static void send_resign(void)
+{
+    if (send_game_cmd(CMD_RESIGN, on_resign_reply)) {
+        ctl.resign_sent = TRUE;
+        notice(NOTE_INFO, "Đang xin thua…");
+    }
+    update_panel();
+}
+
+/* ---- Về sảnh -------------------------------------------------------------------------------------------- */
+
+/* 200|LEAVE_GAME: the server has put us back in the lobby (state L). */
+static void back_to_lobby(void)
+{
+    GameInfo *g = &app.game;
+    close_all_dialogs();
+    g->left = !g->ended;                     /* its GAME_END is still on the way (§3) */
+    g->active = FALSE;
+    memset(&ctl, 0, sizeof ctl);
+    app.state = SESSION_LOBBY;
+    app_show_page("lobby");                  /* sends LIST_PLAYERS again */
+    ui_lobby_request_stats();                /* then STATS: ELO and W/L/D from the server */
+}
+
+static void on_leave_reply(int code, char **f, int n, gpointer data)
+{
+    if (code == RESP_DISCONNECTED)
+        return;
+    gboolean same = app.game.active && app.game.gid == GPOINTER_TO_INT(data);
+    /* 200: we are in the lobby, whatever happened meanwhile. 403 for this very game: the server
+     * no longer sees us in it, so the lobby is where we are too. */
+    if (code == ST_OK || (code == ST_FORBIDDEN && same)) {
+        back_to_lobby();
+        return;
+    }
+    if (!same)
+        return;
+    ctl.leaving = FALSE;
+    error_notice("rời ván", code, f, n);
+    update_panel();
+}
+
+static void send_leave(void)
+{
+    if (send_game_cmd(CMD_LEAVE_GAME, on_leave_reply)) {
+        ctl.leaving = TRUE;
+        close_all_dialogs();                 /* nothing on this page matters any more */
+        notice_clear();
+    }
+    update_panel();
+}
+
+/* ---- confirmations ---------------------------------------------------------------------------------------- */
+
+static void on_confirm_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    int action = GPOINTER_TO_INT(data);
+    int gid = dialog_gid(dialog);
+    dialog_done(&confirm_dialog, dialog);
+    const GameInfo *g = &app.game;
+    /* The game may have ended while the question was open: the dialog was then closed, so
+     * reaching here with "yes" means the game is still the running one we asked about. */
+    if (response != GTK_RESPONSE_ACCEPT || !g->active || g->gid != gid || g->ended || ctl.leaving)
+        return;
+    if (action == CONFIRM_RESIGN && !ctl.resign_sent)
+        send_resign();
+    else if (action == CONFIRM_LEAVE)
+        send_leave();
+}
+
+static void on_resign_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (!app.game.active || app.game.ended || ctl.resign_sent || ctl.leaving)
+        return;
+    close_dialog(&confirm_dialog);
+    confirm_dialog = question_dialog("Bạn chắc chắn muốn xin thua?",
+                                     "Ván kết thúc ngay, bạn bị tính thua và bị trừ ELO.",
+                                     "Chơi tiếp", "Xin thua", FALSE,
+                                     G_CALLBACK(on_confirm_response),
+                                     GINT_TO_POINTER(CONFIRM_RESIGN));
+}
+
+static void on_leave_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (!app.game.active || ctl.leaving || ctl.accepting)
+        return;
+    if (app.game.ended) {                    /* nothing to lose: leave at once */
+        send_leave();
+        return;
+    }
+    close_dialog(&confirm_dialog);
+    confirm_dialog = question_dialog("Ván đang diễn ra. Về sảnh?",
+                                     "Rời ván bây giờ được tính là bạn xin thua: bạn bị tính "
+                                     "thua và bị trừ ELO.",
+                                     "Ở lại", "Rời ván", FALSE,
+                                     G_CALLBACK(on_confirm_response),
+                                     GINT_TO_POINTER(CONFIRM_LEAVE));
+}
+
+/* ---- Cầu hòa ----------------------------------------------------------------------------------------------- */
+
+static void on_draw_offer_reply(int code, char **f, int n, gpointer data)
+{
+    if (!reply_is_current(code, data) || ctl.draw != OFFER_SENDING)
+        return;                              /* GAME_END already settled it */
+    if (code == ST_OK) {
+        ctl.draw = OFFER_PENDING;
+        notice(NOTE_INFO, "Đã gửi lời cầu hòa, đang chờ đối thủ trả lời…");
+    } else {
+        ctl.draw = OFFER_NONE;
+        if (!app.game.ended)
+            error_notice("cầu hòa", code, f, n);
+    }
+    update_panel();
+}
+
+static void on_draw_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (!app.game.active || app.game.ended || ctl.draw != OFFER_NONE || ctl.leaving)
+        return;
+    if (send_game_cmd(CMD_DRAW_OFFER, on_draw_offer_reply)) {
+        ctl.draw = OFFER_SENDING;
+        notice(NOTE_INFO, "Đang gửi lời cầu hòa…");
+    }
+    update_panel();
+}
+
+/* DRAW_REPLY / REMATCH_REPLY: 200 ACCEPT -> GAME_END / GAME_START follows; 200 DECLINE -> done. */
+static void on_answer_reply(int code, char **f, int n, gpointer data)
+{
+    if (!reply_is_current(code, data) || code == ST_OK)
+        return;
+    gboolean was_accepting = ctl.accepting;
+    ctl.accepting = FALSE;
+    if (n >= 3 && strcmp(f[2], ERR_OPPONENT_LEFT) == 0)
+        ctl.opp_left = TRUE;
+    if (was_accepting)                       /* a refused DECLINE changes nothing for the user */
+        error_notice("trả lời", code, f, n);
+    update_panel();
+}
+
+static void send_answer(const char *cmd, int gid, gboolean accept)
+{
+    char *payload = g_strdup_printf("%s|%d|%s", cmd, gid, accept ? ARG_ACCEPT : ARG_DECLINE);
+    if (net_request(payload, on_answer_reply, GINT_TO_POINTER(gid)) && accept)
+        ctl.accepting = TRUE;
+    g_free(payload);
+}
+
+static void on_draw_dialog_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)data;
+    int gid = dialog_gid(dialog);
+    dialog_done(&draw_dialog, dialog);
+    if (!app.game.active || app.game.gid != gid || app.game.ended || ctl.leaving)
+        return;
+    gboolean accept = response == GTK_RESPONSE_ACCEPT;   /* the close button = decline */
+    send_answer(CMD_DRAW_REPLY, gid, accept);
+    notice(NOTE_INFO, accept ? "Bạn đã đồng ý hòa…" : "Bạn đã từ chối lời cầu hòa");
+    update_panel();
+}
+
+/* DRAW_OFFERED|gid — the opponent offers a draw */
+static void on_draw_offered(char **f, int n)
+{
+    if (!event_is_current(f, n) || app.game.ended || ctl.leaving || draw_dialog != NULL)
+        return;
+    char *detail = g_strdup_printf("%s đề nghị hòa ván này. Nếu bạn đi tiếp một nước mà chưa "
+                                   "trả lời, lời đề nghị sẽ hết hiệu lực.", app.game.opponent);
+    draw_dialog = question_dialog("Đối thủ cầu hòa", detail, "Từ chối", "Đồng ý hòa", TRUE,
+                                  G_CALLBACK(on_draw_dialog_response), NULL);
+    g_free(detail);
+    update_panel();
+}
+
+/* DRAW_DECLINED|gid — to the offerer */
+static void on_draw_declined(char **f, int n)
+{
+    if (!event_is_current(f, n) || ctl.draw == OFFER_NONE)
+        return;
+    ctl.draw = OFFER_NONE;
+    notice(NOTE_INFO, "Đối thủ đã từ chối lời cầu hòa");
+    update_panel();
+}
+
+/* ---- Đấu lại ------------------------------------------------------------------------------------------------ */
+
+static void on_rematch_reply(int code, char **f, int n, gpointer data)
+{
+    if (!reply_is_current(code, data) || ctl.rematch != OFFER_SENDING)
+        return;
+    if (code == ST_OK) {
+        ctl.rematch = OFFER_PENDING;
+        notice(NOTE_INFO, "Đã mời đấu lại, đang chờ đối thủ trả lời…");
+    } else {
+        ctl.rematch = OFFER_NONE;
+        if (n >= 3 && strcmp(f[2], ERR_OPPONENT_LEFT) == 0)
+            ctl.opp_left = TRUE;
+        error_notice("đấu lại", code, f, n);
+    }
+    update_panel();
+}
+
+static void on_rematch_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (!app.game.active || !app.game.ended || ctl.opp_left || ctl.rematch != OFFER_NONE
+        || ctl.leaving)
+        return;
+    if (send_game_cmd(CMD_REMATCH, on_rematch_reply)) {
+        ctl.rematch = OFFER_SENDING;
+        notice(NOTE_INFO, "Đang mời đấu lại…");
+    }
+    update_panel();
+}
+
+static void on_rematch_dialog_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)data;
+    int gid = dialog_gid(dialog);
+    dialog_done(&rematch_dialog, dialog);
+    if (!app.game.active || app.game.gid != gid || ctl.opp_left || ctl.leaving)
+        return;
+    gboolean accept = response == GTK_RESPONSE_ACCEPT;
+    send_answer(CMD_REMATCH_REPLY, gid, accept);
+    notice(NOTE_INFO, accept ? "Đang vào ván mới…" : "Bạn đã từ chối đấu lại");
+    update_panel();
+}
+
+/* REMATCH_REQUESTED|gid — the opponent wants another game */
+static void on_rematch_requested(char **f, int n)
+{
+    if (!event_is_current(f, n) || !app.game.ended || ctl.leaving || ctl.opp_left
+        || rematch_dialog != NULL)
+        return;
+    close_dialog(&result_dialog);            /* the panel still shows the result and why */
+    char *detail = g_strdup_printf("%s mời bạn đấu thêm một ván (hai bên đổi X và O).",
+                                   app.game.opponent);
+    rematch_dialog = question_dialog("Đối thủ muốn đấu lại", detail, "Từ chối", "Đấu lại", TRUE,
+                                     G_CALLBACK(on_rematch_dialog_response), NULL);
+    g_free(detail);
+    update_panel();
+}
+
+/* REMATCH_DECLINED|gid — to the requester */
+static void on_rematch_declined(char **f, int n)
+{
+    if (!event_is_current(f, n) || ctl.rematch == OFFER_NONE)
+        return;
+    ctl.rematch = OFFER_NONE;
+    notice(NOTE_INFO, "Đối thủ đã từ chối đấu lại");
+    update_panel();
+}
+
+/* OPP_LEFT|gid — the opponent left the (finished) game or disconnected after it ended */
+static void on_opp_left(char **f, int n)
+{
+    if (!event_is_current(f, n))
+        return;
+    ctl.opp_left = TRUE;
+    ctl.rematch = OFFER_NONE;
+    close_dialog(&rematch_dialog);
+    notice(NOTE_INFO, "Đối thủ đã rời ván");
+    update_panel();
+}
+
+/* ---- the opponent's move, the end ---------------------------------------------------------------------------- */
 
 /* OPP_MOVE|gid|row|col|move_no */
 static void on_opp_move(char **f, int n)
@@ -227,53 +730,28 @@ static void on_opp_move(char **f, int n)
     board_view_set_last(bv, r, c);
     g->move_no = move_no;
     g->turn = g->my_symbol;
+    move_cancels_draw_offers();
     update_panel();
-}
-
-static const char *end_reason_text(const char *reason, char outcome)
-{
-    gboolean won = outcome == 'W';
-    if (strcmp(reason, END_FIVE) == 0)
-        return won ? "Bạn có 5 quân liên tiếp" : "Đối thủ có 5 quân liên tiếp";
-    if (strcmp(reason, END_BOARD_FULL) == 0)
-        return "Bàn cờ đã kín mà không ai có 5 quân liên tiếp";
-    if (strcmp(reason, END_RESIGN) == 0)
-        return won ? "Đối thủ xin thua" : "Bạn xin thua";
-    if (strcmp(reason, END_DRAW_AGREED) == 0)
-        return "Hai bên đồng ý hòa";
-    if (strcmp(reason, END_TIMEOUT) == 0)
-        return won ? "Đối thủ hết thời gian suy nghĩ" : "Bạn hết thời gian suy nghĩ";
-    if (strcmp(reason, END_DISCONNECT) == 0)
-        return won ? "Đối thủ mất kết nối" : "Bạn mất kết nối";
-    return reason;
-}
-
-static void close_result_dialog(void)
-{
-    if (result_dialog != NULL) {
-        gtk_widget_destroy(result_dialog);
-        result_dialog = NULL;
-    }
 }
 
 static void on_result_response(GtkDialog *dialog, gint response, gpointer data)
 {
-    (void)dialog;
     (void)response;
     (void)data;
-    close_result_dialog();
+    dialog_done(&result_dialog, dialog);
 }
 
-static void show_result_dialog(const char *reason)
+static void show_result_dialog(void)
 {
-    close_result_dialog();
+    close_dialog(&result_dialog);
     char d[16];
     fmt_delta(d, sizeof d, end.delta);
     GtkWidget *dlg = gtk_message_dialog_new(app.window, GTK_DIALOG_DESTROY_WITH_PARENT,
         GTK_MESSAGE_INFO, GTK_BUTTONS_NONE, "%s",
         end.outcome == 'W' ? "Bạn thắng!" : end.outcome == 'L' ? "Bạn thua" : "Hòa");
     gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dlg), "%s.\nELO mới: %d (%s)",
-                                             end_reason_text(reason, end.outcome), end.new_elo, d);
+                                             end_reason_text(end.reason, end.outcome),
+                                             end.new_elo, d);
     gtk_dialog_add_button(GTK_DIALOG(dlg), "Đóng", GTK_RESPONSE_CLOSE);
     g_signal_connect(dlg, "response", G_CALLBACK(on_result_response), NULL);
     result_dialog = dlg;
@@ -289,7 +767,18 @@ static void on_game_end(char **f, int n)
         g_printerr("caro_client: warning: bad GAME_END ignored\n");
         return;
     }
-    if (!g->active || gid != g->gid || g->ended)
+    if (!g->active) {
+        /* We left this running game: 200|LEAVE_GAME came first and we are in the lobby. Only
+         * the new ELO matters; the game page is not shown again. */
+        if (g->left && gid == g->gid && !g->ended) {
+            g->ended = TRUE;
+            g->left = FALSE;
+            app.elo = new_elo;
+            ui_lobby_update_bar();
+        }
+        return;
+    }
+    if (gid != g->gid || g->ended)
         return;
 
     const char *result = f[2], *reason = f[3];
@@ -324,37 +813,54 @@ static void on_game_end(char **f, int n)
     end.new_elo = new_elo;
     end.delta = delta;
     end.outcome = outcome;
+    g_strlcpy(end.reason, reason, sizeof end.reason);
+    /* The server's number. W/L/D are not counted here: the lobby asks STATS after LEAVE_GAME. */
     app.elo = new_elo;
-    if (outcome == 'W')
-        app.wins++;
-    else if (outcome == 'L')
-        app.losses++;
-    else
-        app.draws++;
 
+    /* Everything about the running game is over. */
+    close_dialog(&confirm_dialog);
+    close_dialog(&draw_dialog);
+    ctl.resign_sent = FALSE;
+    ctl.accepting = FALSE;
+    ctl.draw = OFFER_NONE;
+    if (strcmp(reason, END_DISCONNECT) == 0)  /* the opponent's connection is gone */
+        ctl.opp_left = TRUE;
+
+    notice_clear();
     update_panel();
-    show_result_dialog(reason);
+    if (!ctl.leaving)                        /* leaving anyway: no dialog that closes at once */
+        show_result_dialog();
 }
 
 /* ---- page ------------------------------------------------------------------------------------------------ */
 
+/* A new game (GAME_START): from the lobby, or here for a rematch (new gid, symbols swapped). */
 void ui_game_enter(void)
 {
     GameInfo *g = &app.game;
-    close_result_dialog();
+    const char *shown = gtk_stack_get_visible_child_name(app.stack);
+    gboolean rematch = shown != NULL && strcmp(shown, "game") == 0;
+
+    close_all_dialogs();
+    memset(&ctl, 0, sizeof ctl);
+    memset(&end, 0, sizeof end);
     board_view_reset(bv, g->size);
     g->turn = 'X';                           /* X always moves first */
     g->move_no = 0;
     g->move_pending = FALSE;
     g->ended = FALSE;
-    memset(&end, 0, sizeof end);
-    gtk_label_set_text(GTK_LABEL(l_notice), "");
+    if (rematch)
+        notice(NOTE_INFO, "Đấu lại: ván mới #%d, bạn cầm %c%s", g->gid, g->my_symbol,
+               g->my_symbol == 'X' ? " và đi trước" : "");
+    else
+        notice_clear();
     update_panel();
 }
 
 void ui_game_reset(void)
 {
-    close_result_dialog();
+    close_all_dialogs();
+    memset(&ctl, 0, sizeof ctl);
 }
 
 static GtkWidget *side_label(GtkWidget *box, gboolean wrap)
@@ -362,14 +868,33 @@ static GtkWidget *side_label(GtkWidget *box, gboolean wrap)
     GtkWidget *l = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
     gtk_label_set_line_wrap(GTK_LABEL(l), wrap);
+    if (wrap)
+        gtk_label_set_max_width_chars(GTK_LABEL(l), SIDE_WRAP_CHARS);
     gtk_box_pack_start(GTK_BOX(box), l, FALSE, FALSE, 0);
     return l;
+}
+
+static GtkWidget *control_button(GtkWidget *grid, const char *label, int col, int row,
+                                 GCallback on_click, const char *style_class)
+{
+    GtkWidget *b = gtk_button_new_with_label(label);
+    if (style_class != NULL)
+        gtk_style_context_add_class(gtk_widget_get_style_context(b), style_class);
+    g_signal_connect(b, "clicked", on_click, NULL);
+    gtk_grid_attach(GTK_GRID(grid), b, col, row, 1, 1);
+    return b;
 }
 
 GtkWidget *ui_game_new(void)
 {
     dispatch_on(EV_OPP_MOVE, on_opp_move);
     dispatch_on(EV_GAME_END, on_game_end);
+    dispatch_on(EV_DRAW_OFFERED, on_draw_offered);
+    dispatch_on(EV_DRAW_DECLINED, on_draw_declined);
+    dispatch_on(EV_REMATCH_REQUESTED, on_rematch_requested);
+    dispatch_on(EV_REMATCH_DECLINED, on_rematch_declined);
+    dispatch_on(EV_OPP_LEFT, on_opp_left);
+    /* GAME_START is handled in ui_lobby.c for both cases; it calls ui_game_enter(). */
 
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
     g_object_set(page, "margin", 16, NULL);
@@ -378,15 +903,41 @@ GtkWidget *ui_game_new(void)
     gtk_box_pack_start(GTK_BOX(page), board_view_widget(bv), TRUE, TRUE, 0);
 
     GtkWidget *side = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_size_request(side, 250, -1);
+    gtk_widget_set_size_request(side, SIDE_WIDTH, -1);
     l_title = side_label(side, FALSE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
     l_me = side_label(side, FALSE);
     l_opp = side_label(side, FALSE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
-    l_turn = side_label(side, FALSE);
+    l_turn = side_label(side, TRUE);
     l_moves = side_label(side, FALSE);
     l_notice = side_label(side, TRUE);
+
+    /* bottom of the side panel: the four controls, then (offline mode) the test keys */
+    if (app.fake_mode) {
+        GtkWidget *hint = gtk_label_new(NULL);
+        gtk_label_set_markup(GTK_LABEL(hint),
+            "<small>Chế độ offline: đối thủ giả từ chối lần cầu hòa / mời đấu lại đầu tiên của "
+            "mỗi ván, đồng ý từ lần thứ hai. <b>Ctrl+D</b> đối thủ cầu hòa · <b>Ctrl+R</b> đối "
+            "thủ mời đấu lại · <b>Ctrl+L</b> đối thủ rời ván · <b>Ctrl+K</b> đối thủ mất kết "
+            "nối · <b>Ctrl+T</b> người đang đi hết giờ.</small>");
+        gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(hint), SIDE_WRAP_CHARS);
+        gtk_label_set_xalign(GTK_LABEL(hint), 0.0f);
+        gtk_box_pack_end(GTK_BOX(side), hint, FALSE, FALSE, 0);
+    }
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
+    b_resign = control_button(grid, "Xin thua", 0, 0, G_CALLBACK(on_resign_clicked),
+                              "destructive-action");
+    b_draw = control_button(grid, "Cầu hòa", 1, 0, G_CALLBACK(on_draw_clicked), NULL);
+    b_rematch = control_button(grid, "Đấu lại", 0, 1, G_CALLBACK(on_rematch_clicked),
+                               "suggested-action");
+    b_leave = control_button(grid, "Về sảnh", 1, 1, G_CALLBACK(on_leave_clicked), NULL);
+    gtk_box_pack_end(GTK_BOX(side), grid, FALSE, FALSE, 0);
+
     gtk_box_pack_start(GTK_BOX(page), side, FALSE, FALSE, 0);
     return page;
 }
