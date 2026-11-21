@@ -30,8 +30,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 ## Integration milestones — both, evening
 
-- [ ] **M0** (18/11) 3 `cli` PING concurrently; split/glued frames OK
-- [ ] **M1** (20/11) register/login from GTK; 401, 409 shown
+- [x] **M0** (18/11) 3 `cli` PING concurrently; split/glued frames OK
+- [x] **M1** (20/11) register/login from GTK; 401, 409 shown
 - [ ] **M2** (22/11) two machines see each other, challenge → GAME_START
 - [ ] **M3** (24/11) full game between two machines; bad moves rejected
 - [ ] **M4** (26/11) every ending correct, ELO persists after restart
@@ -90,3 +90,5 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   and disconnect cleanup. Manual CLI checks passed: successful registration/login/logout,
   re-login after logout, duplicate username, invalid password, invalid credentials and
   forbidden-state requests. `make` clean (zero warnings).
+- 2026-11-21 · Nghĩa + Hân · M0 and M1 reached with Hân's real server: PING, REGISTER, LOGIN,
+  wrong password -> 401 and duplicate login -> 409 shown, tested with two GTK client windows.
