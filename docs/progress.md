@@ -71,3 +71,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   step, a won and a lost game, forced 430, RESIGN/BOARD_FULL texts, lost connection while a
   move is pending) + rendered PNGs checked. GUI click-through in fake mode passed (win, loss,
   win on the board edge); C3 ticked. The 2-window test with the real server waits for S3.
+- 2026-11-21 · Hân · S-pre code: implemented pure Caro board logic (`server/game.h/.c`,
+  MAX_BOARD 19, board initialization, range/empty checks, move placement, win detection
+  in four directions, winning-line coordinates, full-board detection); implemented pure
+  ELO calculation (`server/elo.h/.c`, expected score and rating update, K=32).
+  Added `test_game` (12 tests) and `test_elo` (10 tests); both test suites passed.
+  S-pre pending clean `make` and manual checks before ticking.
