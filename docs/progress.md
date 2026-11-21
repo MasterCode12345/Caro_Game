@@ -19,7 +19,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 ## Server — Hân (`server/`)
 
 - [x] **S0** (17–18/11) select loop, framing, PING, log
-- [ ] **S1** (19–20/11) SQLite, REGISTER/LOGIN/LOGOUT, sessions
+- [x] **S1** (19–20/11) SQLite, REGISTER/LOGIN/LOGOUT, sessions
 - [ ] **S2** (21–22/11) lobby, challenges, expiry
 - [ ] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
 - [ ] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
@@ -84,3 +84,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   requests), /zero, /huge, reconnect after malformed frames, concurrent clients
   and disconnect. `make` clean (zero warnings); `make test` passed
   (test_frame 6/6, test_game 12/12, test_elo 10/10).
+- 2026-11-21 · Hân · S1: implemented SQLite user database (`db.c/.h`), bundled SHA-256
+  password hashing with random salt, REGISTER/LOGIN/LOGOUT handlers, authentication state
+  validation and online-user checks; integrated login/logout `PLAYER_STATUS` broadcasts
+  and disconnect cleanup. Manual CLI checks passed: successful registration/login/logout,
+  re-login after logout, duplicate username, invalid password, invalid credentials and
+  forbidden-state requests. `make` clean (zero warnings).
