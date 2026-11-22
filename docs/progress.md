@@ -136,3 +136,25 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   report; C5 ticked. Still to check with the real server once S7 is done (the fake pairs after
   3 s, too fast to try): opening Lịch sử while searching (GAME_START from the history page stops
   the replay) and Đăng xuất while searching.
+- 2026-11-22 · Nghĩa · C6a: `tools/bot.c` rewritten with POSIX threads (Lec06): one pthread per
+  bot (argument = an element of `bots[]`, which lives until the joins), own socket + FrameBuf,
+  blocking I/O with SO_RCVTIMEO 1 s (EAGAIN -> look at the stop flag). REGISTER (409 ignored) ->
+  LOGIN -> CHALLENGE pairs (bot 2i -> 2i+1, anyone else declined, 404/409 retried after 200 ms) or
+  `--match` (FIND_MATCH) -> random moves on the bot's own board -> LEAVE_GAME -> again. MOVE ->
+  200|MOVE latency with CLOCK_MONOTONIC in per-thread arrays, merged after pthread_join (mean,
+  P95, max). Shared counters behind one mutex (additions only; main prints a copy every 10 s).
+  main blocks SIGINT/SIGTERM/SIGALRM with pthread_sigmask before pthread_create and waits with
+  sigwait + setitimer; `--secs`, `--idle K` (K connections that send 2 header bytes, then
+  nothing); `-pthread` for the bot only. Checked: `make` 0 warnings (also gcc-15 -O2), `make test`;
+  real server (S1): N=10 REGISTER/LOGIN, Ctrl+C (SIGINT) and SIGTERM stop at once, 400
+  unknown_command to CHALLENGE -> the bots stay logged in; with `--idle 50` the server still
+  answered PING at once. Games, DECLINE of a stranger, a bot vs a scripted human and `--match`
+  checked against a throwaway Python mock server (~200 000 moves in 11 s, the per-thread move
+  counters add up to the shared one). `make debug` (ASan/UBSan) clean with N=10; ThreadSanitizer
+  clean (N=20 + `--idle 10`, `--match` + SIGINT), and it does report the race when the mutex is
+  removed (the counter check then shows lost updates). Waiting: games and latency with the real
+  server need S2–S4 (`--match`: S7); the N=20 `--idle 0` vs `--idle 50` comparison needs S3.
+  Found with the bot (server side, to report in `docs/issues.md`): when several logged-in clients
+  disconnect at once, `session_end()` broadcasts OFFLINE before closing its fd, a failed
+  `send_event()` calls `session_end()` on the other client, which broadcasts back -> endless
+  recursion -> SIGSEGV (ASan: stack-overflow, net.c:173 / net.c:198 / lobby.c:65), 3 of 3 runs.

@@ -46,6 +46,11 @@ TESTS_OBJ  := $(OBJ)/server/tests/test_game.o $(OBJ)/server/tests/test_elo.o
 SERVER_BIN := $(BUILD)/caro_server
 CLIENT_BIN := $(BUILD)/caro_client
 TOOL_BINS  := $(TOOLS:%=$(BUILD)/%)
+# tools/bot is the only multithreaded program (one pthread per bot, Lec06): -pthread is given to
+# it alone, when compiling bot.c and when linking build/bot. A plain variable, not a
+# target-specific one: those are inherited by prerequisites (frame.o, build/.flags).
+BOT_BIN       := $(BUILD)/bot
+PTHREAD_FLAGS := -pthread
 TEST_BINS  := $(BUILD)/test_frame $(BUILD)/test_game $(BUILD)/test_elo
 
 .PHONY: all server client tools test debug clean
@@ -75,8 +80,11 @@ $(SERVER_BIN): $(SERVER_OBJ) $(COMMON_OBJ)
 $(CLIENT_BIN): $(CLIENT_OBJ) $(COMMON_OBJ)
 	$(CC) $(LDFLAGS) $^ -o $@ $(GTK_LIBS)
 
-$(TOOL_BINS): $(BUILD)/%: $(OBJ)/tools/%.o $(COMMON_OBJ)
+$(filter-out $(BOT_BIN),$(TOOL_BINS)): $(BUILD)/%: $(OBJ)/tools/%.o $(COMMON_OBJ)
 	$(CC) $(LDFLAGS) $^ -o $@
+
+$(BOT_BIN): $(OBJ)/tools/bot.o $(COMMON_OBJ)
+	$(CC) $(LDFLAGS) $^ -o $@ $(PTHREAD_FLAGS)
 
 # Server unit tests link only the pure module they test (no sockets, no DB).
 $(BUILD)/test_game: $(OBJ)/server/tests/test_game.o $(OBJ)/server/game.o
@@ -95,6 +103,11 @@ $(OBJ)/client/%.o: client/%.c $(BUILD)/.flags
 $(OBJ)/server/tests/%.o: server/tests/%.c $(BUILD)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Iserver $(DEPFLAGS) -c $< -o $@
+
+# An explicit rule, so it wins over the generic pattern rule below.
+$(OBJ)/tools/bot.o: tools/bot.c $(BUILD)/.flags
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(PTHREAD_FLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ)/%.o: %.c $(BUILD)/.flags
 	@mkdir -p $(@D)

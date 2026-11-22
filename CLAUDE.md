@@ -67,7 +67,7 @@ Caro_Game/
 │   └── ui_history.c          # history list + replay viewer
 ├── tools/                    # Nghĩa
 │   ├── cli.c                 # interactive line client (manual protocol testing)
-│   ├── bot.c                 # N bots in one process (load testing)
+│   ├── bot.c                 # N bots in one process, one pthread each (load testing)
 │   └── test_frame.c          # framing unit tests over socketpair()
 └── docs/
     ├── protocol.md           # THE protocol
@@ -82,6 +82,7 @@ make                      # everything into build/
 ./build/caro_server 5500  # server (default port 5500)
 ./build/caro_client       # GTK client
 ./build/cli 127.0.0.1 5500
+./build/bot 127.0.0.1 5500 20 --secs 60 --idle 50   # load test: 20 bot threads + 50 slow clients
 make test                 # test_frame + server unit tests
 make debug                # same with -O0 -g -fsanitize=address,undefined
 ```
@@ -122,7 +123,18 @@ Always drain `frame_next()` until it returns 0 before calling `frame_recv()` aga
 
 - One process, one thread, one `select()` loop over the listening socket and every client.
   Why not `fork()` (Lec05): child processes do not share memory, so the lobby, the challenges and
-  the board could not be shared without IPC. Why not threads: every shared table would need mutexes.
+  the board could not be shared without IPC.
+- Why not threads (Lec06). One thread per client would cost more than it gives for Caro:
+  (a) a game has 2 players, so 2 threads would change the same `Game`: every game needs its own
+  mutex, and when two players challenge each other at the same moment, A's thread locks A then B
+  while B's thread locks B then A → deadlock;
+  (b) a `PLAYER_STATUS` broadcast would hold the online-list lock while it `send()`s to many
+  sockets, exactly what the lecture says to avoid (no blocking I/O inside a critical section);
+  (c) most clients sit idle (in the lobby, or thinking up to 30 s per move), yet every thread
+  still costs a stack;
+  (d) a request costs a few µs of CPU, so running requests in parallel gains nothing.
+  `tools/bot.c` does use pthreads, to generate load: its bots are independent clients that share
+  only a counters struct behind one mutex.
 - `select()` timeout = 1 s; after every loop iteration call `tick(now)` for challenge expiry,
   matchmaking and move timers. Re-initialise the `fd_set`s and `struct timeval` every iteration.
   Handle `EINTR` on `select()` and `accept()` (Lec05).
