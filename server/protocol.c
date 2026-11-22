@@ -61,7 +61,12 @@ static const Command commands[] = {
     { CMD_CHALLENGE_REPLY,  LOBBY_ONLY,   3, 3, handle_challenge_reply },
     { CMD_CHALLENGE_CANCEL, LOBBY_ONLY,   2, 2, handle_challenge_cancel },
     { CMD_MOVE,             IN_GAME_ONLY, 4, 4, handle_move },
-    { CMD_LEAVE_GAME,       IN_GAME_ONLY, 2, 2, handle_leave_game }
+    { CMD_LEAVE_GAME,       IN_GAME_ONLY, 2, 2, handle_leave_game },
+    { CMD_RESIGN,           IN_GAME_ONLY, 2, 2, handle_resign },
+    { CMD_DRAW_OFFER,       IN_GAME_ONLY, 2, 2, handle_draw_offer },
+    { CMD_DRAW_REPLY,       IN_GAME_ONLY, 3, 3, handle_draw_reply },
+    { CMD_REMATCH,          IN_GAME_ONLY, 2, 2, handle_rematch },
+    { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply }
 };
 
 void handle_message(Client *c, char *msg)

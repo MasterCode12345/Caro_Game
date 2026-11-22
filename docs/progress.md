@@ -216,3 +216,10 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   mean 1.523 → 1.254 ms, P95 4.820 → 2.974 ms, max 95.194 → 49.061 ms, ~5 760 → ~6 930
   moves/s (one run each, so max is noisy). `make` zero warnings, `make test` passed.
   Issue #001 added to `docs/issues.md`.
+- 2026-11-22 · Hân · S4: `RESIGN`, `DRAW_OFFER` / `DRAW_REPLY`, `REMATCH` / `REMATCH_REPLY` (new gid,
+  X and O swapped), `LEAVE_GAME` cancels a pending rematch, `game_detach()` follows §8 (running
+  game: opponent wins by DISCONNECT; ended game: OPP_LEFT). Every handler updates the Game first,
+  sends the response, then re-checks the sender and the Game before sending events. Checked with
+  50 scripted checks on an ASan/UBSan build (all five ways to end a game, declined draw, declined
+  and accepted rematch, leave, disconnect of one or both players, 12 clients closing together),
+  `make` zero warnings, `make test` passed.

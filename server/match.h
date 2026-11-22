@@ -57,4 +57,11 @@ void game_detach(Client *c);
 void handle_move(Client *c, char *fields[], int nfields);
 void handle_leave_game(Client *c, char *fields[], int nfields);
 
+/* S4: RESIGN|gid, DRAW_OFFER|gid, DRAW_REPLY|gid|ACCEPT|DECLINE, REMATCH|gid,
+ * REMATCH_REPLY|gid|ACCEPT|DECLINE. */
+void handle_resign(Client *c, char *fields[], int nfields);
+void handle_draw_offer(Client *c, char *fields[], int nfields);
+void handle_draw_reply(Client *c, char *fields[], int nfields);
+void handle_rematch(Client *c, char *fields[], int nfields);
+void handle_rematch_reply(Client *c, char *fields[], int nfields);
 #endif /* CARO_SERVER_MATCH_H */

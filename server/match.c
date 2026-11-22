@@ -198,9 +198,36 @@ void game_detach(Client *c)
     if (c == NULL || c->game == NULL)
         return;
 
-    /* TODO(S4): a running game is won by the opponent (reason DISCONNECT); an ended game
-     * sends OPP_LEFT. For now only make sure no pointer to this client survives. */
-    game_remove_player(c->game, c);
+    Game *g = c->game;
+    int id = g->id;
+    int was_running = !g->ended;
+
+    /* session_end() has already set c->fd = -1, so game_end() skips c and only the opponent
+     * is written to. c stays in the Game until the end, so a failed send to the opponent
+     * (which detaches HIM) can never free g under our feet. */
+    if (was_running) {
+        Client *opp = opponent_of(g, c);
+
+        if (opp != NULL)
+            game_end(g, (g->x == c) ? CELL_O : CELL_X, END_DISCONNECT, NULL);
+        else
+            g->ended = 1;
+    }
+
+    if (g->id != id)                    /* cannot happen, but never touch a freed slot */
+        return;
+
+    g->draw_offer_by = 0;
+    g->rematch_by = 0;                  /* a pending rematch dies with the player */
+
+    Client *opp = opponent_of(g, c);
+
+    game_remove_player(g, c);           /* c->game = NULL; frees g if nobody is left */
+
+    /* An ended game: the opponent is told that c is gone (protocol section 8). A running game
+     * already told him with GAME_END (DISCONNECT). */
+    if (!was_running && opp != NULL && opp->fd >= 0)
+        send_event(opp, EV_OPP_LEFT "|%d", id);
 }
 
 /* ---------------------------------------------------------------------------------------
@@ -331,6 +358,7 @@ void handle_leave_game(Client *c, char *fields[], int nfields)
 
     Client *opp = opponent_of(g, c);
 
+    g->rematch_by = 0;                  /* a rematch request of c dies with him */
     game_remove_player(g, c);           /* c->game = NULL; frees g if nobody is left */
 
     c->state = SESSION_LOBBY;
@@ -338,4 +366,274 @@ void handle_leave_game(Client *c, char *fields[], int nfields)
 
     if (opp != NULL && opp->fd >= 0)
         send_event(opp, EV_OPP_LEFT "|%d", id);
+}
+
+
+/* ---------------------------------------------------------------------------------------
+ * S4: RESIGN, DRAW_OFFER, DRAW_REPLY, REMATCH, REMATCH_REPLY
+ *
+ * Every handler follows the same order: validate -> change the Game -> response to the sender
+ * -> events. After the response (a send that can fail) the handler checks again that the
+ * sender and the Game are still alive before it sends anything else.
+ * ------------------------------------------------------------------------------------- */
+
+/* Checks 1 and 2 shared by all five: gid is a number (400 bad_args) and c plays game gid
+ * (403 not_in_game). Sends the error itself and returns NULL, or returns the Game. */
+static Game *game_of(Client *c, const char *gid_text, const char *cmd)
+{
+    long gid;
+
+    if (!parse_long(gid_text, &gid)) {
+        reply(c, ST_BAD_REQUEST, cmd, ERR_BAD_ARGS);
+        return NULL;
+    }
+
+    Game *g = c->game;
+
+    if (g == NULL || g->id != gid || (g->x != c && g->o != c)) {
+        reply(c, ST_FORBIDDEN, cmd, ERR_NOT_IN_GAME);
+        return NULL;
+    }
+
+    return g;
+}
+
+/* ACCEPT -> 1, DECLINE -> 0, anything else -> -1. */
+static int parse_answer(const char *s)
+{
+    if (strcmp(s, ARG_ACCEPT) == 0)
+        return 1;
+    if (strcmp(s, ARG_DECLINE) == 0)
+        return 0;
+    return -1;
+}
+
+static char symbol_of(const Game *g, const Client *c)
+{
+    return (g->x == c) ? CELL_X : CELL_O;
+}
+
+/* The client that plays symbol sym, or NULL if he left. */
+static Client *player_with(const Game *g, char sym)
+{
+    return (sym == CELL_X) ? g->x : g->o;
+}
+
+/* RESIGN|gid: the opponent wins. */
+void handle_resign(Client *c, char *fields[], int nfields)
+{
+    (void)nfields;
+
+    Game *g = game_of(c, fields[1], CMD_RESIGN);
+
+    if (g == NULL)
+        return;
+
+    if (g->ended) {
+        reply(c, ST_GAME_NOT_ACTIVE, CMD_RESIGN, ERR_GAME_NOT_ACTIVE);
+        return;
+    }
+
+    int id = g->id;
+    char winner = (symbol_of(g, c) == CELL_X) ? CELL_O : CELL_X;
+
+    /* If this send fails, c is detached and game_detach() already ended the game. */
+    if (reply(c, ST_OK, CMD_RESIGN, NULL) < 0)
+        return;
+
+    if (g->id == id)
+        game_end(g, winner, END_RESIGN, NULL);
+}
+
+/* DRAW_OFFER|gid: ask the opponent for a draw (one offer at a time). */
+void handle_draw_offer(Client *c, char *fields[], int nfields)
+{
+    (void)nfields;
+
+    Game *g = game_of(c, fields[1], CMD_DRAW_OFFER);
+
+    if (g == NULL)
+        return;
+
+    if (g->ended) {
+        reply(c, ST_GAME_NOT_ACTIVE, CMD_DRAW_OFFER, ERR_GAME_NOT_ACTIVE);
+        return;
+    }
+
+    if (g->draw_offer_by != 0) {
+        reply(c, ST_CONFLICT, CMD_DRAW_OFFER, ERR_OFFER_PENDING);
+        return;
+    }
+
+    int id = g->id;
+
+    g->draw_offer_by = symbol_of(g, c);
+
+    if (reply(c, ST_OK, CMD_DRAW_OFFER, NULL) < 0)
+        return;                         /* c is gone: the game was ended by game_detach() */
+
+    if (g->id != id)
+        return;
+
+    Client *opp = opponent_of(g, c);
+
+    if (opp != NULL && opp->fd >= 0)
+        send_event(opp, EV_DRAW_OFFERED "|%d", id);
+}
+
+/* DRAW_REPLY|gid|ACCEPT|DECLINE: answer the OPPONENT's offer. */
+void handle_draw_reply(Client *c, char *fields[], int nfields)
+{
+    (void)nfields;
+
+    int accept = parse_answer(fields[2]);
+
+    if (accept < 0) {
+        reply(c, ST_BAD_REQUEST, CMD_DRAW_REPLY, ERR_BAD_ARGS);
+        return;
+    }
+
+    Game *g = game_of(c, fields[1], CMD_DRAW_REPLY);
+
+    if (g == NULL)
+        return;
+
+    if (g->ended) {
+        reply(c, ST_GAME_NOT_ACTIVE, CMD_DRAW_REPLY, ERR_GAME_NOT_ACTIVE);
+        return;
+    }
+
+    /* There must be an offer, and it must come from the other player (not from c himself). */
+    if (g->draw_offer_by == 0 || g->draw_offer_by == symbol_of(g, c)) {
+        reply(c, ST_NOT_FOUND, CMD_DRAW_REPLY, ERR_NO_PENDING_OFFER);
+        return;
+    }
+
+    int id = g->id;
+    Client *offerer = player_with(g, g->draw_offer_by);
+
+    if (!accept)
+        g->draw_offer_by = 0;           /* update first, send afterwards */
+
+    if (reply(c, ST_OK, CMD_DRAW_REPLY, NULL) < 0)
+        return;
+
+    if (g->id != id)
+        return;
+
+    if (accept) {
+        game_end(g, 'D', END_DRAW_AGREED, NULL);
+        return;
+    }
+
+    offerer = player_with(g, (symbol_of(g, c) == CELL_X) ? CELL_O : CELL_X);   /* re-read */
+
+    if (offerer != NULL && offerer->fd >= 0)
+        send_event(offerer, EV_DRAW_DECLINED "|%d", id);
+}
+
+/* REMATCH|gid: ask for another game. Only after the game ended. */
+void handle_rematch(Client *c, char *fields[], int nfields)
+{
+    (void)nfields;
+
+    Game *g = game_of(c, fields[1], CMD_REMATCH);
+
+    if (g == NULL)
+        return;
+
+    if (!g->ended) {                    /* a running game cannot have a rematch */
+        reply(c, ST_FORBIDDEN, CMD_REMATCH, ERR_FORBIDDEN_STATE);
+        return;
+    }
+
+    if (opponent_of(g, c) == NULL) {
+        reply(c, ST_NOT_FOUND, CMD_REMATCH, ERR_OPPONENT_LEFT);
+        return;
+    }
+
+    if (g->rematch_by != 0) {
+        reply(c, ST_CONFLICT, CMD_REMATCH, ERR_OFFER_PENDING);
+        return;
+    }
+
+    int id = g->id;
+
+    g->rematch_by = symbol_of(g, c);
+
+    if (reply(c, ST_OK, CMD_REMATCH, NULL) < 0)
+        return;                         /* c is gone and detached: the request died with him */
+
+    if (g->id != id)
+        return;
+
+    Client *opp = opponent_of(g, c);
+
+    if (opp != NULL && opp->fd >= 0)
+        send_event(opp, EV_REMATCH_REQUESTED "|%d", id);
+}
+
+/* REMATCH_REPLY|gid|ACCEPT|DECLINE: answer the opponent's rematch request. */
+void handle_rematch_reply(Client *c, char *fields[], int nfields)
+{
+    (void)nfields;
+
+    int accept = parse_answer(fields[2]);
+
+    if (accept < 0) {
+        reply(c, ST_BAD_REQUEST, CMD_REMATCH_REPLY, ERR_BAD_ARGS);
+        return;
+    }
+
+    Game *g = game_of(c, fields[1], CMD_REMATCH_REPLY);
+
+    if (g == NULL)
+        return;
+
+    if (!g->ended) {
+        reply(c, ST_FORBIDDEN, CMD_REMATCH_REPLY, ERR_FORBIDDEN_STATE);
+        return;
+    }
+
+    if (opponent_of(g, c) == NULL) {
+        reply(c, ST_NOT_FOUND, CMD_REMATCH_REPLY, ERR_OPPONENT_LEFT);
+        return;
+    }
+
+    if (g->rematch_by == 0 || g->rematch_by == symbol_of(g, c)) {
+        reply(c, ST_NOT_FOUND, CMD_REMATCH_REPLY, ERR_NO_PENDING_OFFER);
+        return;
+    }
+
+    int id = g->id;
+    int size = g->board.size;
+    int sec = g->sec;
+
+    g->rematch_by = 0;                  /* update first, send afterwards */
+
+    if (reply(c, ST_OK, CMD_REMATCH_REPLY, NULL) < 0)
+        return;                         /* c is gone: the old game gets OPP_LEFT for the other */
+
+    if (g->id != id)
+        return;
+
+    if (!accept) {
+        Client *requester = opponent_of(g, c);
+
+        if (requester != NULL && requester->fd >= 0)
+            send_event(requester, EV_REMATCH_DECLINED "|%d", id);
+        return;
+    }
+
+    /* ACCEPT: the old game is freed and a new one starts with X and O swapped. */
+    Client *old_x = g->x;
+    Client *old_o = g->o;
+
+    if (old_x == NULL || old_o == NULL || old_x->fd < 0 || old_o->fd < 0)
+        return;
+
+    game_remove_player(g, old_x);
+    game_remove_player(g, old_o);       /* second call frees the slot */
+
+    game_start(old_o, old_x, size, sec);
 }
