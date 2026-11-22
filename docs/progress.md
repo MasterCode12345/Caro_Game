@@ -20,8 +20,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 - [x] **S0** (17–18/11) select loop, framing, PING, log
 - [x] **S1** (19–20/11) SQLite, REGISTER/LOGIN/LOGOUT, sessions
-- [ ] **S2** (21–22/11) lobby, challenges, expiry
-- [ ] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
+- [x] **S2** (21–22/11) lobby, challenges, expiry
+- [x] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
 - [ ] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
 - [ ] **S5** (25–26/11) DB + ELO
 - [ ] **S6** (27–28/11) history/replay/leaderboard
@@ -158,3 +158,30 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   disconnect at once, `session_end()` broadcasts OFFLINE before closing its fd, a failed
   `send_event()` calls `session_end()` on the other client, which broadcasts back -> endless
   recursion -> SIGSEGV (ASan: stack-overflow, net.c:173 / net.c:198 / lobby.c:65), 3 of 3 runs.
+- 2026-11-22 · Hân · S2: `LIST_PLAYERS` (sorted, caller excluded), `CHALLENGE` / `CHALLENGE_REPLY` /
+  `CHALLENGE_CANCEL` with every error of protocol §6.2 (bad_args, user_not_found, player_busy,
+  challenge_pending, challenge_not_found), 30 s expiry from `tick()` (`lobby_tick`),
+  `challenges_drop_for()` called from game start, LOGOUT and `session_end()`. Temporary
+  `game_start()` (challenger plays X, GAME_START to both, PLAYER_STATUS IN_GAME) and `LEAVE_GAME`
+  stub in `match.c`; S3 replaces them with the real Game. Checked with a scripted 2–3 client
+  test (validation, decline, cancel, accept, two incoming challenges, disconnect and logout
+  cleanup, 30 s expiry) on an ASan/UBSan build: all passed, no sanitizer output.
+  `make` zero warnings, `make test` passed. Note: the opponent also receives `PLAYER_STATUS`
+  about the other player at game start (protocol §7: every logged-in client except the subject).
+- 2026-11-22 · Hân · S3: real `struct Game` table (`match.h`), `game_start()` creates the Game
+  (board, turn X, deadline), `MOVE` with the checks in the exact order of §6.3 (400, 403, 433,
+  430, 431, 432; the board never changes on error), response → `OPP_MOVE` → `GAME_END`,
+  `game_end()` (FIVE with the 5 cells, BOARD_FULL, delta "0" until S5), `LEAVE_GAME` checks the
+  gid and ends a running game by RESIGN, `game_detach()` called from `session_end()`.
+  Fixed the `session_end()` recursion found by Nghĩa's bot (see issues.md): the slot's fd is now
+  set to -1 before anything is sent to other clients. Checked with 57 scripted checks (incl. a
+  225-move draw and a disconnect in a running game) on an ASan/UBSan build, S2 regression 36/36,
+  `make test` passed, zero warnings.
+- 2026-11-22 · Hân · S3: real `struct Game` table (`match.h`), `game_start()` creates the Game
+  (board, turn X, deadline), `MOVE` with the checks in the exact order of §6.3 (400, 403, 433,
+  430, 431, 432; board unchanged on error), response → `OPP_MOVE` → `GAME_END`, `game_end()`
+  (FIVE with 5 cells, BOARD_FULL, delta "0" until S5), `LEAVE_GAME` checks the gid and ends a
+  running game by RESIGN, `game_detach()` from `session_end()`. Fixed an S1 bug in
+  `session_end()`: two clients closing together recursed hundreds of times (fd is now set to -1
+  first). Checked with 57 scripted checks (incl. a 225-move draw) on an ASan/UBSan build, S2
+  regression 36/36, `make test` passed, zero warnings.

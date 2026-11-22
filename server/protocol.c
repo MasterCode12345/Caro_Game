@@ -60,6 +60,7 @@ static const Command commands[] = {
     { CMD_CHALLENGE,        LOBBY_ONLY,   4, 4, handle_challenge },
     { CMD_CHALLENGE_REPLY,  LOBBY_ONLY,   3, 3, handle_challenge_reply },
     { CMD_CHALLENGE_CANCEL, LOBBY_ONLY,   2, 2, handle_challenge_cancel },
+    { CMD_MOVE,             IN_GAME_ONLY, 4, 4, handle_move },
     { CMD_LEAVE_GAME,       IN_GAME_ONLY, 2, 2, handle_leave_game }
 };
 

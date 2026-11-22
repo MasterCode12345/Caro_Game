@@ -5,11 +5,14 @@
  * S0: accept connections, receive framed messages, send replies and close sessions.
  * S1: broadcast OFFLINE when a logged-in client disconnects.
  * S2: drop pending challenges in session_end().
+ * S3: take the client out of its game in session_end(); fd is set to -1 first so two clients
+ *     closing together cannot make session_end() call itself again and again.
  */
 #include "net.h"
 #include "protocol.h"
 #include "log.h"
 #include "lobby.h"
+#include "match.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -194,19 +197,30 @@ void session_end(Client *c)
 
     snprintf(username, sizeof(username), "%s", c->username);
 
+    /* Mark the slot closed FIRST. Everything below sends events to OTHER clients, and a failed
+     * send ends that client's session, whose own broadcast would try to write to c again and
+     * call session_end(c) again. With fd = -1 every send_event() to c returns at once and the
+     * guard at the top of this function stops the loop (two clients closing together used to
+     * recurse hundreds of times). The log line needs c->addr, so addr is cleared last. */
+    int fd = c->fd;
+    c->fd = -1;
+
     /* Pending challenges (outgoing or incoming) die with the session; the other side gets
-     * CHALLENGE_CANCELLED. Done while c->fd is still valid. */
+     * CHALLENGE_CANCELLED. They are matched by pointer, so fd = -1 does not matter. */
     challenges_drop_for(c);
 
-    /* Notify other logged-in clients before closing this session. */
+    /* S3: take c out of its game so no Game keeps a pointer to this slot (S4 adds the
+     * DISCONNECT result). */
+    game_detach(c);
+
+    /* Notify other logged-in clients (broadcast_status skips fd < 0, so never c itself). */
     if (was_logged_in && username[0] != '\0') {
         broadcast_status(c, username, PS_OFFLINE, elo);
     }
 
     log_event("disconnected: %s", c->addr);
 
-    close(c->fd);
-    c->fd = -1;
+    close(fd);
 
     c->addr[0] = '\0';
     c->state = SESSION_CONNECTED;
