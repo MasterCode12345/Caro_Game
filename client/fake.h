@@ -30,4 +30,9 @@ typedef enum {
 } FakeOpponentAction;
 gboolean fake_simulate_opponent(FakeOpponentAction action);
 
+/* Test hook (Ctrl+M in the lobby, main.c): the next CANCEL_MATCH "arrives" just after the fake
+ * matchmaker paired us, so the client gets GAME_START first and then 403|CANCEL_MATCH|
+ * forbidden_state (protocol.md §6.2). FALSE if not in the lobby or the queue. */
+gboolean fake_simulate_match_race(void);
+
 #endif /* CARO_CLIENT_FAKE_H */

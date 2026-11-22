@@ -35,6 +35,13 @@ void dispatch_trace(const char *dir, const char *msg);
 /* Decimal field -> int (strtol + end pointer). FALSE if s is not exactly an integer. */
 gboolean field_int(const char *s, int *out);
 
+/* "7,11" -> 7, 11: a coordinate list item (protocol.md §2). FALSE unless exactly two integers. */
+gboolean field_rc(const char *s, int *row, int *col);
+
+/* One list item "han,1016,IDLE" -> its attributes, split on ',' in place (protocol.md §2).
+ * Returns the number of parts, or max + 1 if there are more than max. */
+int item_split(char *item, char *parts[], int max);
+
 void dispatch_cleanup(void);   /* at exit: drop pending requests WITHOUT calling them */
 
 #endif /* CARO_CLIENT_DISPATCH_H */

@@ -43,13 +43,21 @@
  *       RESIGN, then OPP_LEFT; ended: OPP_LEFT), disconnects (running: GAME_END DISCONNECT;
  *       ended: OPP_LEFT; back online 5 s later), or the player to move runs out of time
  *       (GAME_END TIMEOUT).
+ *   C5  HISTORY|page: 12 older scripted games (2 pages) + every fake game played in this
+ *       session, newest first, 10 per page. REPLAY|mid: the moves of that game; the newest
+ *       scripted one (mid 112, vs han) is 20 moves won by O with FIVE; 404 for an unknown mid.
+ *       LEADERBOARD|n: the 4 fake players, 8 users that are never online and us, by ELO then
+ *       name (at 1000 we are 8th of the top 10; a few losses push us out of it).
+ *       FIND_MATCH -> 200 (IN_QUEUE); pending invitations get CHALLENGE_CANCELLED; about 3 s
+ *       later GAME_START against an idle fake player, 30 s per move, we play X and O in turn.
+ *       CANCEL_MATCH -> 200 (back to the lobby); after fake_simulate_match_race() (Ctrl+M) the
+ *       next one "arrives" after the match: GAME_START first, then 403 forbidden_state.
  *   anything else -> 400 unknown_command (not faked yet)
- *
- * TODO(C5): HISTORY, REPLAY (one 20-move game), LEADERBOARD, FIND_MATCH / CANCEL_MATCH.
  */
 #include "fake.h"
 
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "dispatch.h"
@@ -63,6 +71,10 @@
 #define FAKE_OPP_MOVE_MS    500      /* the fake opponent answers a move after 0.5 s */
 #define FAKE_ELO_DELTA      16
 #define FAKE_RECONNECT_MS   5000     /* a disconnected fake opponent is back online after 5 s */
+#define FAKE_MATCH_MS       3000     /* FIND_MATCH: a fake opponent is found about 3 s later */
+#define FAKE_MATCH_RETRY_MS 1000     /* nobody idle: try again next second, like the server's tick */
+#define FAKE_MAX_PLAYED     64       /* played games kept for HISTORY; then the oldest is dropped */
+#define FAKE_FIRST_MID      101      /* match ids of the scripted games: 101..112 */
 
 /* ---- outbox: messages and actions, delivered in due-time order ---------------------------------- */
 
@@ -181,13 +193,14 @@ typedef struct {
     const char *name;
     int         elo;
     const char *status;      /* PS_IDLE, PS_IN_GAME, PS_OFFLINE, ... */
+    int         wins, losses, draws;
 } FakePlayer;
 
 static const FakePlayer initial_players[] = {   /* sorted by name, like LIST_PLAYERS */
-    { "han",  1016, PS_IDLE },
-    { "lan",  1050, PS_OFFLINE },
-    { "minh",  980, PS_IN_GAME },
-    { "tuan", 1100, PS_IDLE },
+    { "han",  1016, PS_IDLE,    9, 7, 2 },
+    { "lan",  1050, PS_OFFLINE, 12, 8, 1 },
+    { "minh",  980, PS_IN_GAME, 6, 8, 3 },
+    { "tuan", 1100, PS_IDLE,    15, 9, 2 },
 };
 #define N_PLAYERS G_N_ELEMENTS(initial_players)
 
@@ -262,10 +275,11 @@ typedef enum { BY_NONE, BY_ME, BY_OPP } OfferBy;   /* who made the pending draw/
 static struct {
     gboolean exists;         /* GAME_START sent (game running or ended) */
     gboolean running;
-    int      gid, opp;
+    int      gid, opp, sec;
     char     me_sym, turn;
     int      move_no;
     char     cells[BOARD_SIZE][BOARD_SIZE];
+    unsigned char moves[BOARD_SIZE * BOARD_SIZE][2];   /* in play order, for REPLAY */
     OfferBy  draw_by, rematch_by;
     int      draw_asks, rematch_asks;     /* our offers in this game: the first is declined */
     guint    draw_serial, rematch_serial; /* the offer a scheduled answer belongs to */
@@ -274,11 +288,140 @@ static struct {
 static int   me_elo = ELO_START, me_wins, me_losses, me_draws;
 static guint offer_serial;                /* never reset: a stale answer can never match */
 
+static guint    mm_timer;                 /* FIND_MATCH: the matchmaker's pending "found" */
+static int      mm_count;                 /* quick matches so far: we play X and O in turn */
+static int      mm_rr;                    /* round robin over possible quick-match opponents */
+static gboolean mm_race;                  /* Ctrl+M: the next CANCEL_MATCH loses the race */
+
 static const int DIRS[4][2] = { { 0, 1 }, { 1, 0 }, { 1, 1 }, { 1, -1 } };
 
 static char other(char sym)
 {
     return sym == 'X' ? 'O' : 'X';
+}
+
+/* -- finished games: HISTORY and REPLAY (§6.4) -- */
+
+typedef struct {
+    int           mid;
+    char          opponent[USERNAME_MAX + 1];
+    char          my_sym;                /* 'X' or 'O' */
+    char          winner;                /* 'X', 'O', or 0 for a draw */
+    const char   *reason;                /* END_* */
+    char          ended_at[24];          /* "YYYY-MM-DD HH:MM" */
+    int           n_moves;
+    unsigned char moves[BOARD_SIZE * BOARD_SIZE][2];
+} FakeMatch;
+
+/* 20 moves, O makes five on row 6 with the last one (checked: no five before it). */
+static const unsigned char SCRIPT_O20[][2] = {
+    { 7, 7 }, { 6, 8 }, { 7, 8 }, { 7, 6 }, { 8, 8 }, { 5, 9 }, { 9, 8 }, { 6, 7 }, { 8, 6 },
+    { 8, 7 }, { 9, 5 }, { 4, 9 }, { 10, 4 }, { 11, 3 }, { 10, 5 }, { 6, 9 }, { 7, 9 }, { 6, 10 },
+    { 6, 6 }, { 6, 11 },
+};
+/* 9 moves, X makes five on row 7 with the last one. */
+static const unsigned char SCRIPT_X9[][2] = {
+    { 7, 7 }, { 8, 8 }, { 7, 8 }, { 6, 9 }, { 7, 6 }, { 6, 7 }, { 7, 9 }, { 7, 5 }, { 7, 10 },
+};
+
+typedef struct {
+    const char          *opponent;
+    char                 my_sym;
+    const char          *outcome;        /* OUT_*, from our side */
+    const char          *reason;
+    const char          *ended_at;
+    const unsigned char (*script)[2];
+    int                  n_moves;
+} FakeSeed;
+
+/* Oldest first; mid = FAKE_FIRST_MID + index. A FIVE game plays its whole script, whose winner
+ * agrees with outcome. Other endings stop early in SCRIPT_O20 (no five before move 20); a
+ * TIMEOUT stops when the loser is the one to move (X after an even number of moves). */
+static const FakeSeed seeds[] = {
+    { "han",  'X', OUT_DRAW, END_DRAW_AGREED, "2026-11-18 20:25", SCRIPT_O20, 16 },
+    { "minh", 'X', OUT_WIN,  END_TIMEOUT,     "2026-11-18 21:00", SCRIPT_O20, 13 },
+    { "tuan", 'O', OUT_LOSS, END_FIVE,        "2026-11-18 21:35", SCRIPT_X9,   9 },
+    { "lan",  'O', OUT_LOSS, END_RESIGN,      "2026-11-19 20:00", SCRIPT_O20,  9 },
+    { "han",  'O', OUT_WIN,  END_FIVE,        "2026-11-19 22:45", SCRIPT_O20, 20 },
+    { "minh", 'X', OUT_LOSS, END_FIVE,        "2026-11-19 23:10", SCRIPT_O20, 20 },
+    { "tuan", 'X', OUT_WIN,  END_DISCONNECT,  "2026-11-20 21:20", SCRIPT_O20,  7 },
+    { "han",  'O', OUT_LOSS, END_TIMEOUT,     "2026-11-20 22:05", SCRIPT_O20, 11 },
+    { "lan",  'X', OUT_DRAW, END_DRAW_AGREED, "2026-11-20 22:30", SCRIPT_O20, 18 },
+    { "minh", 'O', OUT_WIN,  END_RESIGN,      "2026-11-21 20:50", SCRIPT_O20, 14 },
+    { "tuan", 'X', OUT_WIN,  END_FIVE,        "2026-11-21 21:15", SCRIPT_X9,   9 },
+    { "han",  'X', OUT_LOSS, END_FIVE,        "2026-11-21 21:40", SCRIPT_O20, 20 },
+};
+
+static FakeMatch matches[G_N_ELEMENTS(seeds) + FAKE_MAX_PLAYED];   /* oldest first */
+static int       n_matches, next_mid;
+
+static void reset_matches(void)
+{
+    n_matches = 0;
+    for (size_t i = 0; i < G_N_ELEMENTS(seeds); i++) {
+        const FakeSeed *sd = &seeds[i];
+        FakeMatch *m = &matches[n_matches++];
+        memset(m, 0, sizeof *m);
+        m->mid = FAKE_FIRST_MID + (int)i;
+        g_strlcpy(m->opponent, sd->opponent, sizeof m->opponent);
+        m->my_sym = sd->my_sym;
+        m->winner = strcmp(sd->outcome, OUT_DRAW) == 0 ? 0
+                  : strcmp(sd->outcome, OUT_WIN) == 0 ? sd->my_sym : other(sd->my_sym);
+        m->reason = sd->reason;
+        g_strlcpy(m->ended_at, sd->ended_at, sizeof m->ended_at);
+        m->n_moves = sd->n_moves;
+        memcpy(m->moves, sd->script, (size_t)sd->n_moves * sizeof m->moves[0]);
+    }
+    next_mid = FAKE_FIRST_MID + (int)G_N_ELEMENTS(seeds);
+}
+
+/* The fake game that just ended becomes the newest match of HISTORY. */
+static void save_match(char winner, const char *reason)
+{
+    if (n_matches == (int)G_N_ELEMENTS(matches)) {             /* full: forget the oldest */
+        memmove(&matches[0], &matches[1], (size_t)(n_matches - 1) * sizeof matches[0]);
+        n_matches--;
+    }
+    FakeMatch *m = &matches[n_matches++];
+    m->mid = next_mid++;
+    g_strlcpy(m->opponent, players[game.opp].name, sizeof m->opponent);
+    m->my_sym = game.me_sym;
+    m->winner = winner;
+    m->reason = reason;
+    GDateTime *now = g_date_time_new_now_local();
+    gchar *when = g_date_time_format(now, "%Y-%m-%d %H:%M");
+    g_strlcpy(m->ended_at, when, sizeof m->ended_at);
+    g_free(when);
+    g_date_time_unref(now);
+    m->n_moves = game.move_no;
+    memcpy(m->moves, game.moves, (size_t)game.move_no * sizeof m->moves[0]);
+}
+
+static const FakeMatch *find_match(int mid)
+{
+    for (int i = 0; i < n_matches; i++)
+        if (matches[i].mid == mid)
+            return &matches[i];
+    return NULL;
+}
+
+static const char *match_outcome(const FakeMatch *m)
+{
+    return m->winner == 0 ? OUT_DRAW : m->winner == m->my_sym ? OUT_WIN : OUT_LOSS;
+}
+
+static const char *match_result(const FakeMatch *m)
+{
+    return m->winner == 'X' ? RES_X_WIN : m->winner == 'O' ? RES_O_WIN : RES_DRAW;
+}
+
+/* A mark on the board, remembered in play order for REPLAY. */
+static void record_move(int r, int c, char sym)
+{
+    game.cells[r][c] = sym;
+    game.moves[game.move_no][0] = (unsigned char)r;
+    game.moves[game.move_no][1] = (unsigned char)c;
+    game.move_no++;
 }
 
 static gboolean in_board(int r, int c)
@@ -332,14 +475,20 @@ static void end_game(char winner, const char *reason, int line[WIN_LENGTH][2], g
     game.running = FALSE;
     game.draw_by = BY_NONE;
     int delta = winner == 0 ? 0 : winner == game.me_sym ? FAKE_ELO_DELTA : -FAKE_ELO_DELTA;
+    FakePlayer *opp = &players[game.opp];
     me_elo += delta;
-    players[game.opp].elo -= delta;
-    if (winner == 0)
+    opp->elo -= delta;
+    if (winner == 0) {
         me_draws++;
-    else if (winner == game.me_sym)
+        opp->draws++;
+    } else if (winner == game.me_sym) {
         me_wins++;
-    else
+        opp->losses++;
+    } else {
         me_losses++;
+        opp->wins++;
+    }
+    save_match(winner, reason);
 
     GString *s = g_string_new(NULL);
     g_string_printf(s, "%s|%d|%s|%s|%d|", EV_GAME_END, game.gid,
@@ -412,15 +561,14 @@ static void act_opp_move(gpointer arg)
     }
     if (pick_r < 0)
         return;
-    game.cells[pick_r][pick_c] = sym;
-    game.move_no++;
+    record_move(pick_r, pick_c, sym);
     game.turn = game.me_sym;
     game.draw_by = BY_NONE;                  /* a move cancels any pending draw offer */
     push_fmt(0, "%s|%d|%d|%d|%d", EV_OPP_MOVE, game.gid, pick_r, pick_c, game.move_no);
     check_end(pick_r, pick_c, sym, 0);
 }
 
-static void start_game(int opp, char my_symbol, guint delay_ms)
+static void start_game(int opp, char my_symbol, int sec, guint delay_ms)
 {
     clear_challenges();
     fstate = SESSION_IN_GAME;
@@ -428,12 +576,13 @@ static void start_game(int opp, char my_symbol, guint delay_ms)
     game.exists = game.running = TRUE;
     game.gid = next_gid++;
     game.opp = opp;
+    game.sec = sec;
     game.me_sym = my_symbol;
     game.turn = 'X';
     memset(game.cells, '.', sizeof game.cells);
 
     push_fmt(delay_ms, "%s|%d|%d|%c|%s|%d|%d", EV_GAME_START, game.gid, BOARD_SIZE, my_symbol,
-             players[opp].name, players[opp].elo, SEC_PER_MOVE_NORMAL);
+             players[opp].name, players[opp].elo, sec);
     set_status(opp, PS_IN_GAME, players[opp].elo, delay_ms);   /* others learn it after GAME_START */
     if (my_symbol == 'O')                                      /* the fake opponent opens */
         later(delay_ms + FAKE_OPP_MOVE_MS, act_opp_move, GINT_TO_POINTER(game.gid));
@@ -469,7 +618,7 @@ static void act_out_accept(gpointer arg)
 {
     if (out_cid == GPOINTER_TO_INT(arg)) {
         out_cid = 0;
-        start_game(out_target, 'X', 0);   /* the challenger plays X, as in §10 */
+        start_game(out_target, 'X', SEC_PER_MOVE_NORMAL, 0);   /* the challenger plays X (§10) */
     }
 }
 
@@ -520,7 +669,7 @@ static void act_opp_rematch_answer(gpointer arg)
     if (game.rematch_asks <= 1)
         push_fmt(0, "%s|%d", EV_REMATCH_DECLINED, game.gid);
     else
-        start_game(game.opp, other(game.me_sym), 0);   /* X and O swapped */
+        start_game(game.opp, other(game.me_sym), game.sec, 0);   /* X and O swapped */
 }
 
 static void act_back_online(gpointer arg)
@@ -556,6 +705,10 @@ void fake_stop(void)
     script_started = FALSE;
     out_cid = 0;
     n_invites = 0;
+    mm_timer = 0;                    /* its outbox entry was freed above */
+    mm_count = mm_rr = 0;
+    mm_race = FALSE;
+    reset_matches();
 }
 
 /* ---- requests ---------------------------------------------------------------------------------------- */
@@ -605,10 +758,19 @@ static void fake_login(char **f, int n)
     }
 }
 
+static void leave_queue(void)
+{
+    if (mm_timer != 0) {
+        cancel(mm_timer);
+        mm_timer = 0;
+    }
+}
+
 static void fake_logout(void)
 {
     if (!allowed(CMD_LOGOUT, IN(SESSION_LOBBY) | IN(SESSION_IN_QUEUE)))
         return;
+    leave_queue();                   /* LOGOUT from Q also removes us from the queue (§6.1) */
     clear_challenges();
     fstate = SESSION_CONNECTED;
     reply("%d|%s", ST_OK, CMD_LOGOUT);
@@ -702,7 +864,7 @@ static void fake_challenge_reply(char **f, int n)
     } else {
         int from = invites[k].from;
         reply("%d|%s", ST_OK, CMD_CHALLENGE_REPLY);
-        start_game(from, 'O', FAKE_LATENCY_MS);    /* response first, then GAME_START (§3) */
+        start_game(from, 'O', SEC_PER_MOVE_NORMAL, FAKE_LATENCY_MS);   /* 200 first (§3) */
     }
 }
 
@@ -725,8 +887,7 @@ static void fake_move(char **f, int n)
     else if (game.cells[r][c] != '.')
         reply("%d|%s|%s", ST_CELL_OCCUPIED, CMD_MOVE, ERR_CELL_OCCUPIED);
     else {
-        game.cells[r][c] = game.me_sym;
-        game.move_no++;
+        record_move(r, c, game.me_sym);
         game.turn = other(game.me_sym);
         game.draw_by = BY_NONE;                                  /* §6.3 step 7 */
         reply("%d|%s|%d", ST_OK, CMD_MOVE, game.move_no);        /* response first (§3) ... */
@@ -841,7 +1002,7 @@ static void fake_rematch_reply(char **f, int n)
         game.rematch_by = BY_NONE;
         reply("%d|%s", ST_OK, CMD_REMATCH_REPLY);
         if (strcmp(f[2], ARG_ACCEPT) == 0)
-            start_game(game.opp, other(game.me_sym), FAKE_LATENCY_MS);   /* X and O swapped */
+            start_game(game.opp, other(game.me_sym), game.sec, FAKE_LATENCY_MS);   /* swapped */
     }
 }
 
@@ -872,6 +1033,176 @@ static void fake_stats(char **f, int n)
         reply("%d|%s|%s", ST_NOT_FOUND, CMD_STATS, ERR_USER_NOT_FOUND);
     else                                     /* the fake players have no recorded games */
         reply("%d|%s|%s|%d|0|0|0", ST_OK, CMD_STATS, players[i].name, players[i].elo);
+}
+
+/* -- quick match (§6.2) -- */
+
+/* An idle fake player, round robin; -1 if nobody is idle. */
+static int pick_idle_opponent(void)
+{
+    for (int tries = 0; tries < (int)N_PLAYERS; tries++) {
+        int i = mm_rr++ % (int)N_PLAYERS;
+        if (has_status(i, PS_IDLE) && strcmp(players[i].name, me) != 0)
+            return i;
+    }
+    return -1;
+}
+
+/* The matchmaker pairs us now: GAME_START at once. The real server gives X to the player who
+ * waited longer; the fake alternates so that both sides get tested. */
+static gboolean match_now(void)
+{
+    int opp = pick_idle_opponent();
+    if (opp < 0)
+        return FALSE;
+    start_game(opp, mm_count++ % 2 == 0 ? 'X' : 'O', MATCH_SEC_PER_MOVE, 0);
+    return TRUE;
+}
+
+static void act_match(gpointer arg)
+{
+    (void)arg;
+    mm_timer = 0;
+    if (fstate == SESSION_IN_QUEUE && !match_now())
+        mm_timer = later(FAKE_MATCH_RETRY_MS, act_match, NULL);
+}
+
+static void fake_find_match(void)
+{
+    if (!allowed(CMD_FIND_MATCH, IN(SESSION_LOBBY)))
+        return;
+    fstate = SESSION_IN_QUEUE;
+    reply("%d|%s", ST_OK, CMD_FIND_MATCH);              /* the response first, then events (§3) */
+    /* §6.2: entering the queue removes every pending challenge involving us. The invitations
+     * we received are announced to us with CHALLENGE_CANCELLED; our own challenge (the client
+     * does not send FIND_MATCH while it has one) would be announced to its target only. */
+    while (n_invites > 0) {
+        push_fmt(FAKE_LATENCY_MS, "%s|%d", EV_CHALLENGE_CANCELLED, invites[n_invites - 1].cid);
+        drop_invite(n_invites - 1);
+    }
+    if (out_cid != 0) {
+        cancel(out_timer);
+        out_cid = 0;
+    }
+    mm_timer = later(FAKE_LATENCY_MS + FAKE_MATCH_MS, act_match, NULL);
+}
+
+static void fake_cancel_match(void)
+{
+    /* Not in the queue (also: already paired, state G) -> 403 forbidden_state, by allowed(). */
+    if (!allowed(CMD_CANCEL_MATCH, IN(SESSION_IN_QUEUE)))
+        return;
+    leave_queue();
+    if (mm_race) {
+        /* Ctrl+M: the matchmaker paired us just before this request arrived. GAME_START is
+         * delivered now, the 403 after the usual latency: the order the client must handle. */
+        mm_race = FALSE;
+        if (match_now()) {
+            reply("%d|%s|%s", ST_FORBIDDEN, CMD_CANCEL_MATCH, ERR_FORBIDDEN_STATE);
+            return;
+        }
+    }
+    fstate = SESSION_LOBBY;
+    reply("%d|%s", ST_OK, CMD_CANCEL_MATCH);
+}
+
+/* -- history and ranking (§6.4) -- */
+
+static void fake_history(char **f, int n)
+{
+    if (!allowed(CMD_HISTORY, IN(SESSION_LOBBY) | IN(SESSION_IN_QUEUE)))
+        return;
+    int page = 1;
+    if (n > 2 || (n == 2 && (!field_int(f[1], &page) || page < 1))) {
+        reply("%d|%s|%s", ST_BAD_REQUEST, CMD_HISTORY, ERR_BAD_ARGS);
+        return;
+    }
+    GString *items = g_string_new(NULL);
+    int count = 0;
+    gint64 first = (gint64)(page - 1) * HISTORY_PAGE_SIZE;     /* newest first */
+    for (gint64 k = first; k < first + HISTORY_PAGE_SIZE && k < n_matches; k++) {
+        const FakeMatch *m = &matches[n_matches - 1 - k];
+        g_string_append_printf(items, "|%d,%s,%c,%s,%s,%s", m->mid, m->opponent, m->my_sym,
+                               match_outcome(m), m->reason, m->ended_at);
+        count++;
+    }
+    reply("%d|%s|%d|%d%s", ST_OK, CMD_HISTORY, page, count, items->str);
+    g_string_free(items, TRUE);
+}
+
+static void fake_replay(char **f, int n)
+{
+    if (!allowed(CMD_REPLAY, IN(SESSION_LOBBY) | IN(SESSION_IN_QUEUE)))
+        return;
+    int mid;
+    const FakeMatch *m;
+    if (n != 2 || !field_int(f[1], &mid)) {
+        reply("%d|%s|%s", ST_BAD_REQUEST, CMD_REPLAY, ERR_BAD_ARGS);
+        return;
+    }
+    if ((m = find_match(mid)) == NULL) {
+        reply("%d|%s|%s", ST_NOT_FOUND, CMD_REPLAY, ERR_MATCH_NOT_FOUND);
+        return;
+    }
+    gboolean me_x = m->my_sym == 'X';
+    GString *s = g_string_new(NULL);
+    g_string_printf(s, "%d|%s|%d|%d|%s|%s|%s|%s|%d", ST_OK, CMD_REPLAY, m->mid, BOARD_SIZE,
+                    me_x ? me : m->opponent, me_x ? m->opponent : me, match_result(m), m->reason,
+                    m->n_moves);
+    for (int i = 0; i < m->n_moves; i++)
+        g_string_append_printf(s, "|%d,%d", m->moves[i][0], m->moves[i][1]);
+    fake_push(FAKE_LATENCY_MS, s->str);
+    g_string_free(s, TRUE);
+}
+
+typedef struct {
+    const char *name;
+    int         elo, wins, losses, draws;
+} FakeRank;
+
+/* Registered users who are never online in the fake world: they only show up in LEADERBOARD. */
+static const FakeRank offline_users[] = {
+    { "quang", 1240, 31, 12, 4 }, { "vy",   1185, 25, 14, 2 }, { "son",  1150, 20, 13, 5 },
+    { "duc",   1090, 15, 12, 3 }, { "linh",  975,  8, 10, 1 }, { "khoa",  940,  6, 11, 2 },
+    { "mai",    910,  4, 12, 0 }, { "thao",  880,  3, 14, 1 },
+};
+
+static int rank_cmp(const void *a, const void *b)
+{
+    const FakeRank *x = a, *y = b;
+    if (x->elo != y->elo)
+        return x->elo > y->elo ? -1 : 1;                 /* ELO descending, then username */
+    return strcmp(x->name, y->name);
+}
+
+static void fake_leaderboard(char **f, int n)
+{
+    if (!allowed(CMD_LEADERBOARD, IN(SESSION_LOBBY) | IN(SESSION_IN_QUEUE)))
+        return;
+    int limit = LEADERBOARD_DEFAULT;
+    if (n > 2 || (n == 2 && (!field_int(f[1], &limit) || limit < 1 || limit > LEADERBOARD_MAX))) {
+        reply("%d|%s|%s", ST_BAD_REQUEST, CMD_LEADERBOARD, ERR_BAD_ARGS);
+        return;
+    }
+    FakeRank all[G_N_ELEMENTS(offline_users) + N_PLAYERS + 1];
+    int k = 0;
+    for (size_t i = 0; i < G_N_ELEMENTS(offline_users); i++)
+        if (strcmp(offline_users[i].name, me) != 0)
+            all[k++] = offline_users[i];
+    for (size_t i = 0; i < N_PLAYERS; i++)
+        if (strcmp(players[i].name, me) != 0)
+            all[k++] = (FakeRank){ players[i].name, players[i].elo, players[i].wins,
+                                   players[i].losses, players[i].draws };
+    all[k++] = (FakeRank){ me, me_elo, me_wins, me_losses, me_draws };
+    qsort(all, (size_t)k, sizeof all[0], rank_cmp);
+
+    GString *rows = g_string_new(NULL);
+    int shown = MIN(k, limit);
+    for (int i = 0; i < shown; i++)
+        g_string_append_printf(rows, "|%d,%s,%d,%d,%d,%d", i + 1, all[i].name, all[i].elo,
+                               all[i].wins, all[i].losses, all[i].draws);
+    reply("%d|%s|%d%s", ST_OK, CMD_LEADERBOARD, shown, rows->str);
+    g_string_free(rows, TRUE);
 }
 
 /* The opponent is gone (left or disconnected): no rematch any more. */
@@ -924,6 +1255,14 @@ gboolean fake_simulate_opponent(FakeOpponentAction action)
         return TRUE;
     }
     return FALSE;
+}
+
+gboolean fake_simulate_match_race(void)
+{
+    if (fstate != SESSION_LOBBY && fstate != SESSION_IN_QUEUE)
+        return FALSE;
+    mm_race = TRUE;
+    return TRUE;
 }
 
 gboolean fake_simulate_invite(gboolean withdraw)
@@ -989,6 +1328,16 @@ void fake_handle(const char *payload)
         fake_leave_game(f, n);
     else if (strcmp(cmd, CMD_STATS) == 0)
         fake_stats(f, n);
+    else if (strcmp(cmd, CMD_FIND_MATCH) == 0)
+        fake_find_match();
+    else if (strcmp(cmd, CMD_CANCEL_MATCH) == 0)
+        fake_cancel_match();
+    else if (strcmp(cmd, CMD_HISTORY) == 0)
+        fake_history(f, n);
+    else if (strcmp(cmd, CMD_REPLAY) == 0)
+        fake_replay(f, n);
+    else if (strcmp(cmd, CMD_LEADERBOARD) == 0)
+        fake_leaderboard(f, n);
     else
         reply("%d|%s|%s", ST_BAD_REQUEST, cmd, ERR_UNKNOWN_COMMAND);
 

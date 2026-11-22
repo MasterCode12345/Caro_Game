@@ -13,7 +13,9 @@
  * Losing the server (net_on_lost) ends in app_go_login(): every page's reset function closes
  * its own dialogs first, so no dialog outlives the session.
  *
- * TODO(C5): real history page; it registers its events with dispatch_on().
+ * Page changes all go through app_show_page(): it tells the page that is shown what to load,
+ * and tells the history page when it is left, so its replay timer never runs in the background.
+ *
  * TODO(C6): minimum window size.
  */
 #include <signal.h>
@@ -40,20 +42,19 @@ static gboolean env_is_one(const char *name)
     return v != NULL && strcmp(v, "1") == 0;
 }
 
-static GtkWidget *placeholder_page(const char *text)
-{
-    GtkWidget *label = gtk_label_new(text);
-    gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-    return label;
-}
-
 void app_show_page(const char *name)
 {
+    /* Leaving the history page (also when GAME_START pulls us into a game while we watch a
+     * replay from the queue): its auto-play timer is removed with g_source_remove(). Harmless
+     * when the history page was not shown. */
+    if (strcmp(name, "history") != 0)
+        ui_history_leave();
     if (strcmp(name, "lobby") == 0)
         ui_lobby_enter();
     else if (strcmp(name, "game") == 0)
         ui_game_enter();
+    else if (strcmp(name, "history") == 0)
+        ui_history_enter();
     gtk_stack_set_visible_child_name(app.stack, name);
 }
 
@@ -61,6 +62,7 @@ void app_go_login(const char *error)
 {
     ui_lobby_reset();                /* no dialog may outlive the session */
     ui_game_reset();
+    ui_history_reset();
     app.state = SESSION_CONNECTED;
     app.username[0] = '\0';
     app.elo = app.wins = app.losses = app.draws = 0;
@@ -70,7 +72,8 @@ void app_go_login(const char *error)
 }
 
 /* Offline-mode test keys (Cmd also works on macOS).
- *   lobby page: Ctrl+I = receive a fake invitation, Ctrl+U = one withdrawn after 5 s.
+ *   lobby page: Ctrl+I = receive a fake invitation, Ctrl+U = one withdrawn after 5 s,
+ *               Ctrl+M = the next CANCEL_MATCH reaches the server just after it paired us.
  *   game page:  Ctrl+D the opponent offers a draw, Ctrl+R asks for a rematch, Ctrl+L leaves,
  *               Ctrl+K disconnects, Ctrl+T the player to move runs out of time. */
 static gboolean game_key_action(guint key, FakeOpponentAction *action)
@@ -98,6 +101,11 @@ static gboolean on_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
     if (strcmp(page, "lobby") == 0 && (key == GDK_KEY_i || key == GDK_KEY_u)) {
         if (!fake_simulate_invite(key == GDK_KEY_u))
             g_printerr("caro_client: fake: nobody idle can invite you right now\n");
+    } else if (strcmp(page, "lobby") == 0 && key == GDK_KEY_m) {
+        if (fake_simulate_match_race())
+            g_printerr("caro_client: fake: the next CANCEL_MATCH arrives after the match is made\n");
+        else
+            g_printerr("caro_client: fake: only in the lobby or the queue\n");
     } else if (strcmp(page, "game") == 0 && game_key_action(key, &action)) {
         if (!fake_simulate_opponent(action))
             g_printerr("caro_client: fake: not possible at this point of the game\n");
@@ -131,7 +139,7 @@ int main(int argc, char *argv[])
     gtk_stack_add_named(app.stack, ui_login_new(), "login");
     gtk_stack_add_named(app.stack, ui_lobby_new(), "lobby");
     gtk_stack_add_named(app.stack, ui_game_new(), "game");
-    gtk_stack_add_named(app.stack, placeholder_page("TODO (C5): history page"), "history");
+    gtk_stack_add_named(app.stack, ui_history_new(), "history");
     gtk_container_add(GTK_CONTAINER(window), stack);
 
     gtk_widget_show_all(window);

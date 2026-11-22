@@ -1,5 +1,6 @@
 /*
- * client/ui_lobby.c — page "lobby": who is online, challenges (docs/protocol.md §6.2, §7).
+ * client/ui_lobby.c — page "lobby": who is online, challenges, quick match, leaderboard
+ * (docs/protocol.md §6.2, §6.4, §7).
  * Owner: Nghĩa.
  *
  * WHY THE LOBBY UPDATES ITSELF (no polling)
@@ -26,9 +27,24 @@
  *   response: the client never adds or subtracts ELO or wins itself, the server's database is
  *   the reference. If we left a running game, its GAME_END arrives after the 200 (§3), while
  *   we are already here: ui_game.c then only updates app.elo and calls ui_lobby_update_bar().
- * TODO(C5): "Lịch sử" button; "Bảng xếp hạng" (LEADERBOARD|10 dialog, own row in bold);
- *           "Tìm trận nhanh" (FIND_MATCH -> "searching" dialog with Cancel = CANCEL_MATCH;
- *           GAME_START closes it).
+ *
+ * QUICK MATCH (FIND_MATCH / CANCEL_MATCH, §6.2) — states:
+ *   REQUESTING (FIND_MATCH sent) -> SEARCHING (200: we are IN_QUEUE, "searching" dialog)
+ *   -> CANCELLING (its Hủy button sent CANCEL_MATCH) -> 200: back to LOBBY.
+ *   GAME_START ends any of them: the server paired us, the dialog closes, the game page opens.
+ *   - Not possible while our own challenge waits for an answer: entering the queue removes our
+ *     challenge at the server, and only the TARGET is told (CHALLENGE_CANCELLED), so our
+ *     "waiting" dialog would never close. Thách đấu is locked the whole time we search.
+ *   - Entering the queue also removes the invitations we received (§6.2): their dialogs are
+ *     closed at 200|FIND_MATCH, and a CHALLENGE_CANCELLED for them is handled as usual.
+ *   - RACE: the server pairs players in its 1-second tick. If it pairs us just before our
+ *     CANCEL_MATCH arrives, it has already sent GAME_START, and CANCEL_MATCH (state G now) gets
+ *     403 forbidden_state. TCP keeps the order, so we see GAME_START first: it resets the quick
+ *     match state, and the late 403 no longer matches a CANCELLING state — it is dropped and we
+ *     stay in the game. The serial number makes this check exact.
+ *
+ * LEADERBOARD|10 opens a dialog (rank, name, ELO, W/L/D, our own row in bold). Lịch sử opens
+ * the history page (ui_history.c). Both are allowed in LOBBY and IN_QUEUE (§6.4).
  */
 #include <stdarg.h>
 #include <string.h>
@@ -42,6 +58,8 @@
 enum { COL_NAME, COL_ELO, COL_STATUS, COL_STATUS_TEXT, N_COLS };
 
 typedef enum { OUT_NONE, OUT_REQUESTING, OUT_WAITING, OUT_CANCELLING } OutState;
+typedef enum { MM_NONE, MM_REQUESTING, MM_SEARCHING, MM_CANCELLING } MatchState;
+enum { LB_RANK, LB_NAME, LB_ELO, LB_WLD, LB_WEIGHT, LB_N_COLS };
 
 typedef struct {
     int        cid;
@@ -51,6 +69,7 @@ typedef struct {
 } Invite;
 
 static GtkWidget    *l_user, *l_count, *l_notice, *b_logout, *b_challenge, *tree;
+static GtkWidget    *b_history, *b_leaderboard, *b_quick;
 static GtkListStore *store;
 static GHashTable   *invites;      /* cid -> Invite* (incoming) */
 static struct {
@@ -59,6 +78,19 @@ static struct {
     char       target[USERNAME_MAX + 1];
     GtkWidget *dialog;
 } out;                             /* our outgoing challenge */
+static struct {
+    MatchState state;
+    guint      serial;             /* +1 per FIND_MATCH / CANCEL_MATCH: a late response is spotted */
+    GtkWidget *dialog;             /* "Đang tìm đối thủ…" with Hủy */
+    guint      tick_id;            /* 1-second timer for "Đã chờ N giây" */
+    gint64     started_us;         /* when the server put us in the queue */
+} mm;                              /* quick match */
+static struct {
+    gboolean      pending;         /* LEADERBOARD sent, response not received yet */
+    GtkWidget    *dialog;
+    GtkListStore *store;           /* owned by the dialog's tree view */
+    GtkWidget    *note;
+} lb;
 
 /* ---- small helpers ------------------------------------------------------------------------------- */
 
@@ -97,22 +129,6 @@ static const char *status_text(const char *s)
     if (strcmp(s, PS_IN_GAME) == 0)
         return "Đang chơi";
     return s;
-}
-
-/* "han,1016,IDLE" -> 3 parts, in place. Returns the number of parts, max + 1 if there are more. */
-static int split_item(char *item, char *parts[], int max)
-{
-    int k = 0;
-    parts[k++] = item;
-    for (char *p = item; *p != '\0'; p++) {
-        if (*p != ITEM_SEP)
-            continue;
-        if (k == max)
-            return max + 1;
-        *p = '\0';
-        parts[k++] = p + 1;
-    }
-    return k;
 }
 
 /* ---- player list ---------------------------------------------------------------------------------- */
@@ -160,15 +176,22 @@ static gboolean get_selected(char **name, char **status)
     return TRUE;
 }
 
-/* Challenge is possible only on an IDLE player, from the lobby, with no challenge of ours pending. */
-static void update_challenge_button(void)
+static gboolean invite_accepting(gpointer key, gpointer value, gpointer data);
+
+/* Thách đấu: an IDLE player selected, we are in the lobby (not searching), no challenge of ours
+ * pending. Tìm trận nhanh: in the lobby, not searching yet, no challenge of ours pending and
+ * no invitation being accepted (its GAME_START is on the way). */
+static void update_buttons(void)
 {
+    gboolean idle = app.state == SESSION_LOBBY && mm.state == MM_NONE && out.state == OUT_NONE;
     char *name = NULL, *status = NULL;
-    gboolean ok = app.state == SESSION_LOBBY && out.state == OUT_NONE
-                  && get_selected(&name, &status) && strcmp(status, PS_IDLE) == 0;
+    gboolean ok = idle && get_selected(&name, &status) && strcmp(status, PS_IDLE) == 0;
     gtk_widget_set_sensitive(b_challenge, ok);
     g_free(name);
     g_free(status);
+    gtk_widget_set_sensitive(b_quick,
+                             idle && g_hash_table_find(invites, invite_accepting, NULL) == NULL);
+    gtk_widget_set_sensitive(b_leaderboard, !lb.pending);
 }
 
 /* 200|LIST_PLAYERS|n|user,elo,status|... */
@@ -189,7 +212,7 @@ static void on_list_reply(int code, char **f, int n, gpointer data)
     for (int i = 3; i < n; i++) {
         char *p[3];
         int elo;
-        if (split_item(f[i], p, 3) != 3 || !field_int(p[1], &elo) || !is_player_status(p[2])
+        if (item_split(f[i], p, 3) != 3 || !field_int(p[1], &elo) || !is_player_status(p[2])
             || strcmp(p[0], app.username) == 0) {
             g_printerr("caro_client: warning: bad LIST_PLAYERS item %d ignored\n", i - 2);
             continue;
@@ -197,7 +220,7 @@ static void on_list_reply(int code, char **f, int n, gpointer data)
         set_row(p[0], elo, p[2]);
     }
     update_count();
-    update_challenge_button();
+    update_buttons();
 }
 
 /* PLAYER_STATUS|user|status|elo: add or update the row; OFFLINE removes it. */
@@ -218,7 +241,7 @@ static void on_player_status(char **f, int n)
         set_row(f[1], elo, f[2]);
     }
     update_count();
-    update_challenge_button();
+    update_buttons();
 }
 
 /* ---- outgoing challenge ---------------------------------------------------------------------------- */
@@ -248,7 +271,7 @@ static void on_cancel_reply(int code, char **f, int n, gpointer data)
     else
         notice(NOTE_ERROR, "Không hủy được lời mời (%d %s)", code, n >= 3 ? f[2] : "");
     out_reset();
-    update_challenge_button();
+    update_buttons();
 }
 
 static void on_waiting_response(GtkDialog *dialog, gint response, gpointer data)
@@ -293,7 +316,7 @@ static void on_challenge_reply(int code, char **f, int n, gpointer data)
         out.cid = cid;
         notice_clear();
         show_waiting_dialog();
-        update_challenge_button();
+        update_buttons();
         return;
     }
 
@@ -311,7 +334,7 @@ static void on_challenge_reply(int code, char **f, int n, gpointer data)
     else
         notice(NOTE_ERROR, "Thách đấu thất bại (%d %s)", code, reason);
     out_reset();
-    update_challenge_button();
+    update_buttons();
 }
 
 static void on_challenge_clicked(GtkWidget *w, gpointer data)
@@ -319,7 +342,8 @@ static void on_challenge_clicked(GtkWidget *w, gpointer data)
     (void)w;
     (void)data;
     char *name = NULL, *status = NULL;
-    if (out.state == OUT_NONE && get_selected(&name, &status) && strcmp(status, PS_IDLE) == 0) {
+    if (app.state == SESSION_LOBBY && mm.state == MM_NONE && out.state == OUT_NONE
+        && get_selected(&name, &status) && strcmp(status, PS_IDLE) == 0) {
         char *payload = g_strdup_printf("%s|%s|%d|%d", CMD_CHALLENGE, name, BOARD_SIZE,
                                         SEC_PER_MOVE_NORMAL);
         if (net_request(payload, on_challenge_reply, NULL)) {
@@ -331,14 +355,14 @@ static void on_challenge_clicked(GtkWidget *w, gpointer data)
     }
     g_free(name);
     g_free(status);
-    update_challenge_button();
+    update_buttons();
 }
 
 static void on_selection_changed(GtkTreeSelection *sel, gpointer data)
 {
     (void)sel;
     (void)data;
-    update_challenge_button();
+    update_buttons();
 }
 
 static void on_row_activated(GtkTreeView *tv, GtkTreePath *path, GtkTreeViewColumn *col, gpointer data)
@@ -365,6 +389,13 @@ static Invite *invite_get(int cid)
     return g_hash_table_lookup(invites, GINT_TO_POINTER(cid));
 }
 
+static gboolean invite_accepting(gpointer key, gpointer value, gpointer data)
+{
+    (void)key;
+    (void)data;
+    return ((Invite *)value)->accepting;
+}
+
 static void invite_remove(int cid)
 {
     g_hash_table_remove(invites, GINT_TO_POINTER(cid));   /* destroys its dialog */
@@ -382,9 +413,12 @@ static void on_accept_reply(int code, char **f, int n, gpointer data)
         notice(NOTE_ERROR, "Lời mời của %s không còn hiệu lực", inv->from);
     else if (strcmp(reason, ERR_PLAYER_BUSY) == 0)
         notice(NOTE_ERROR, "%s đã bận, không thể vào ván", inv->from);
+    else if (code == ST_FORBIDDEN)
+        notice(NOTE_ERROR, "Không nhận được lời mời của %s lúc này", inv->from);
     else
         notice(NOTE_ERROR, "Không nhận được lời mời của %s (%d %s)", inv->from, code, reason);
     invite_remove(inv->cid);
+    update_buttons();
 }
 
 static void on_invite_response(GtkDialog *dialog, gint response, gpointer data)
@@ -407,6 +441,7 @@ static void on_invite_response(GtkDialog *dialog, gint response, gpointer data)
         gtk_dialog_set_response_sensitive(dialog, GTK_RESPONSE_REJECT, FALSE);
         gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "Đang vào ván…");
         net_request(payload, on_accept_reply, data);
+        update_buttons();            /* no quick match while GAME_START is on the way */
     } else {                         /* "Từ chối" or the window's close button */
         net_request(payload, NULL, NULL);
         invite_remove(cid);
@@ -453,7 +488,7 @@ static void on_challenge_declined(char **f, int n)
         return;
     notice(NOTE_INFO, "%s đã từ chối lời mời", n >= 3 ? f[2] : out.target);
     out_reset();
-    update_challenge_button();
+    update_buttons();
 }
 
 /* CHALLENGE_EXPIRED|cid — to both sides */
@@ -467,7 +502,7 @@ static void on_challenge_expired(char **f, int n)
         notice(NOTE_INFO, "Lời mời tới %s đã hết hạn (%d giây không trả lời)", out.target,
                CHALLENGE_EXPIRE_SEC);
         out_reset();
-        update_challenge_button();
+        update_buttons();
     } else if (inv != NULL) {
         notice(NOTE_INFO, "Lời mời của %s đã hết hạn", inv->from);
         invite_remove(cid);
@@ -482,19 +517,298 @@ static void on_challenge_cancelled(char **f, int n)
         return;
     Invite *inv = invite_get(cid);
     if (inv != NULL) {
-        notice(NOTE_INFO, "%s đã hủy lời mời", inv->from);
+        if (app.state == SESSION_IN_QUEUE)
+            notice(NOTE_INFO, "Lời mời của %s đã bị hủy vì bạn đang tìm trận", inv->from);
+        else
+            notice(NOTE_INFO, "%s đã hủy lời mời", inv->from);
         invite_remove(cid);
+        update_buttons();
     } else if (out_is(cid)) {
         notice(NOTE_INFO, "Lời mời tới %s đã bị hủy (người đó không còn rảnh)", out.target);
         out_reset();
-        update_challenge_button();
+        update_buttons();
     }
+}
+
+/* ---- quick match (FIND_MATCH / CANCEL_MATCH) --------------------------------------------------------- */
+
+static void mm_close_dialog(void)
+{
+    if (mm.tick_id != 0) {
+        g_source_remove(mm.tick_id);
+        mm.tick_id = 0;
+    }
+    GtkWidget *d = mm.dialog;
+    if (d != NULL) {
+        mm.dialog = NULL;                /* first: nothing may use it while it is destroyed */
+        gtk_widget_destroy(d);
+    }
+}
+
+static void mm_reset(void)
+{
+    mm_close_dialog();
+    mm.state = MM_NONE;
+}
+
+static void search_dialog_update(void)
+{
+    if (mm.dialog == NULL)
+        return;
+    int waited = (int)((g_get_monotonic_time() - mm.started_us) / G_USEC_PER_SEC);
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(mm.dialog),
+        "Đã chờ %d giây. Server ghép bạn với người có ELO gần bạn; chờ càng lâu, khoảng ELO "
+        "cho phép càng rộng.\nVán ghép: bàn %d×%d, %d giây mỗi nước.",
+        waited, BOARD_SIZE, BOARD_SIZE, MATCH_SEC_PER_MOVE);
+}
+
+static gboolean on_search_tick(gpointer data)
+{
+    (void)data;
+    search_dialog_update();
+    return G_SOURCE_CONTINUE;
+}
+
+static void on_cancel_match_reply(int code, char **f, int n, gpointer data);
+static void show_search_dialog(void);
+
+static void on_search_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)dialog;
+    (void)response;                  /* "Hủy" or the window's close button: both cancel */
+    (void)data;
+    mm_close_dialog();
+    if (mm.state != MM_SEARCHING)
+        return;
+    if (net_request(CMD_CANCEL_MATCH, on_cancel_match_reply, GUINT_TO_POINTER(++mm.serial))) {
+        mm.state = MM_CANCELLING;
+        notice(NOTE_INFO, "Đang hủy tìm trận…");
+    }
+}
+
+static void show_search_dialog(void)
+{
+    GtkWidget *d = gtk_message_dialog_new(app.window, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                          GTK_MESSAGE_INFO, GTK_BUTTONS_NONE,
+                                          "Đang tìm đối thủ…");
+    gtk_dialog_add_button(GTK_DIALOG(d), "Hủy", GTK_RESPONSE_CANCEL);
+    g_signal_connect(d, "response", G_CALLBACK(on_search_response), NULL);
+    mm.dialog = d;
+    search_dialog_update();
+    mm.tick_id = g_timeout_add_seconds(1, on_search_tick, NULL);
+    gtk_widget_show_all(d);
+}
+
+/* 200|CANCEL_MATCH: we are back in the lobby. 403 after a GAME_START: see RACE above. */
+static void on_cancel_match_reply(int code, char **f, int n, gpointer data)
+{
+    if (code == RESP_DISCONNECTED || mm.state != MM_CANCELLING || mm.serial != GPOINTER_TO_UINT(data))
+        return;                      /* GAME_START came first and reset mm: keep the game page */
+    if (code == ST_OK || code == ST_FORBIDDEN) {
+        /* 403 without a GAME_START before it: the server has us in no queue and no game */
+        mm_reset();
+        app.state = SESSION_LOBBY;
+        if (code == ST_OK)
+            notice(NOTE_INFO, "Đã hủy tìm trận");
+        else
+            notice(NOTE_ERROR, "Server cho biết bạn không còn trong hàng chờ");
+    } else {                         /* not cancelled: we are still in the queue */
+        mm.state = MM_SEARCHING;
+        notice(NOTE_ERROR, "Không hủy được tìm trận (%d %s)", code, n >= 3 ? f[2] : "");
+        show_search_dialog();
+    }
+    update_buttons();
+}
+
+/* 200|FIND_MATCH: we are IN_QUEUE; GAME_START comes when the server pairs us. */
+static void on_find_match_reply(int code, char **f, int n, gpointer data)
+{
+    if (code == RESP_DISCONNECTED || mm.state != MM_REQUESTING || mm.serial != GPOINTER_TO_UINT(data))
+        return;
+    if (code != ST_OK) {
+        mm_reset();
+        if (code == ST_FORBIDDEN)
+            notice(NOTE_ERROR, "Không thể tìm trận lúc này");
+        else
+            notice(NOTE_ERROR, "Tìm trận thất bại (%d %s)", code, n >= 3 ? f[2] : "");
+        update_buttons();
+        return;
+    }
+    mm.state = MM_SEARCHING;
+    mm.started_us = g_get_monotonic_time();
+    app.state = SESSION_IN_QUEUE;
+    /* §6.2: entering the queue removed every invitation we had received. */
+    guint dropped = g_hash_table_size(invites);
+    g_hash_table_remove_all(invites);
+    if (dropped > 0)
+        notice(NOTE_INFO, "Đang tìm trận: %u lời mời đang chờ đã bị hủy", dropped);
+    else
+        notice_clear();
+    show_search_dialog();
+    update_buttons();
+}
+
+static void on_quick_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (app.state != SESSION_LOBBY || mm.state != MM_NONE || out.state != OUT_NONE)
+        return;
+    if (net_request(CMD_FIND_MATCH, on_find_match_reply, GUINT_TO_POINTER(++mm.serial))) {
+        mm.state = MM_REQUESTING;
+        notice(NOTE_INFO, "Đang vào hàng chờ…");
+    }
+    update_buttons();
+}
+
+/* ---- leaderboard (LEADERBOARD|10) ------------------------------------------------------------------- */
+
+static void lb_close(void)
+{
+    GtkWidget *d = lb.dialog;
+    if (d != NULL) {
+        lb.dialog = NULL;
+        lb.store = NULL;                 /* destroyed with the dialog's tree view */
+        lb.note = NULL;
+        gtk_widget_destroy(d);
+    }
+}
+
+static void on_lb_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)dialog;
+    (void)response;
+    (void)data;
+    lb_close();
+}
+
+static void lb_add_column(GtkWidget *view, const char *title, int col, float xalign)
+{
+    GtkCellRenderer *r = gtk_cell_renderer_text_new();
+    g_object_set(r, "xalign", xalign, NULL);
+    GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(title, r, "text", col,
+                                                                    "weight", LB_WEIGHT, NULL);
+    gtk_tree_view_column_set_alignment(c, xalign);
+    gtk_tree_view_column_set_expand(c, col == LB_NAME);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(view), c);
+}
+
+static void lb_create(void)
+{
+    GtkWidget *d = gtk_dialog_new_with_buttons("Bảng xếp hạng", app.window,
+                                               GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               "Đóng", GTK_RESPONSE_CLOSE, NULL);
+    gtk_window_set_default_size(GTK_WINDOW(d), 460, 420);
+    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(d));
+    gtk_box_set_spacing(GTK_BOX(box), 8);
+    g_object_set(box, "margin", 12, NULL);
+
+    GtkWidget *title = gtk_label_new(NULL);
+    char *markup = g_strdup_printf("<span size='large'><b>Top %d theo ELO</b></span>",
+                                   LEADERBOARD_DEFAULT);
+    gtk_label_set_markup(GTK_LABEL(title), markup);
+    g_free(markup);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_box_pack_start(GTK_BOX(box), title, FALSE, FALSE, 0);
+
+    lb.store = gtk_list_store_new(LB_N_COLS, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING,
+                                  G_TYPE_INT);
+    GtkWidget *view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(lb.store));
+    g_object_unref(lb.store);                               /* the view holds the reference */
+    gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(view)),
+                                GTK_SELECTION_NONE);
+    lb_add_column(view, "Hạng", LB_RANK, 1.0f);
+    lb_add_column(view, "Tên", LB_NAME, 0.0f);
+    lb_add_column(view, "ELO", LB_ELO, 1.0f);
+    lb_add_column(view, "Thắng/Thua/Hòa", LB_WLD, 1.0f);
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scroll), GTK_SHADOW_IN);
+    gtk_container_add(GTK_CONTAINER(scroll), view);
+    gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 0);
+
+    lb.note = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(lb.note), 0.0f);
+    gtk_label_set_line_wrap(GTK_LABEL(lb.note), TRUE);
+    gtk_box_pack_start(GTK_BOX(box), lb.note, FALSE, FALSE, 0);
+
+    g_signal_connect(d, "response", G_CALLBACK(on_lb_response), NULL);
+    lb.dialog = d;
+}
+
+/* 200|LEADERBOARD|k|rank,user,elo,wins,losses,draws|... */
+static void on_lb_reply(int code, char **f, int n, gpointer data)
+{
+    (void)data;
+    lb.pending = FALSE;
+    if (code == RESP_DISCONNECTED)
+        return;
+    update_buttons();
+    if (app.state != SESSION_LOBBY && app.state != SESSION_IN_QUEUE)
+        return;                      /* GAME_START came first: no table over the game page */
+    int k;
+    if (code != ST_OK || n < 3 || !field_int(f[2], &k)) {
+        notice(NOTE_ERROR, "Không tải được bảng xếp hạng (%d %s)", code, n >= 3 ? f[2] : "");
+        return;
+    }
+    if (k != n - 3)
+        g_printerr("caro_client: warning: LEADERBOARD says %d rows but has %d\n", k, n - 3);
+
+    if (lb.dialog == NULL)
+        lb_create();
+    gtk_list_store_clear(lb.store);
+    gboolean me_listed = FALSE;
+    for (int i = 3; i < n; i++) {
+        char *p[6];
+        int rank, elo, w, l, d;
+        if (item_split(f[i], p, 6) != 6 || !field_int(p[0], &rank) || !field_int(p[2], &elo)
+            || !field_int(p[3], &w) || !field_int(p[4], &l) || !field_int(p[5], &d)) {
+            g_printerr("caro_client: warning: bad LEADERBOARD item %d ignored\n", i - 2);
+            continue;
+        }
+        gboolean me = strcmp(p[1], app.username) == 0;
+        me_listed = me_listed || me;
+        char wld[48];
+        snprintf(wld, sizeof wld, "%d/%d/%d", w, l, d);
+        gtk_list_store_insert_with_values(lb.store, NULL, -1, LB_RANK, rank, LB_NAME, p[1],
+                                          LB_ELO, elo, LB_WLD, wld,
+                                          LB_WEIGHT, me ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL, -1);
+    }
+    char *note = me_listed
+        ? g_strdup("Dòng in đậm là bạn.")
+        : g_strdup_printf("Bạn (ELO %d) chưa có mặt trong top %d.", app.elo, LEADERBOARD_DEFAULT);
+    gtk_label_set_text(GTK_LABEL(lb.note), note);
+    g_free(note);
+    gtk_widget_show_all(lb.dialog);
+    gtk_window_present(GTK_WINDOW(lb.dialog));
+}
+
+static void on_leaderboard_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    if (lb.pending)
+        return;
+    char *payload = g_strdup_printf("%s|%d", CMD_LEADERBOARD, LEADERBOARD_DEFAULT);
+    if (net_request(payload, on_lb_reply, NULL))
+        lb.pending = TRUE;
+    g_free(payload);
+    update_buttons();
+}
+
+static void on_history_clicked(GtkWidget *w, gpointer data)
+{
+    (void)w;
+    (void)data;
+    app_show_page("history");        /* HISTORY is allowed in LOBBY and IN_QUEUE (§6.4) */
 }
 
 static void close_all_dialogs(void)
 {
     out_reset();
     g_hash_table_remove_all(invites);
+    mm_reset();
+    lb_close();
 }
 
 /* GAME_START|gid|size|your_symbol|opponent|opp_elo|sec_per_move — to both players.
@@ -520,7 +834,7 @@ static void on_game_start(char **f, int n)
     app.game.opp_elo = opp_elo;
     app.game.sec_per_move = sec;
     app.state = SESSION_IN_GAME;
-    update_challenge_button();
+    update_buttons();
     app_show_page("game");
 }
 
@@ -599,13 +913,14 @@ void ui_lobby_enter(void)
 
     gtk_list_store_clear(store);
     update_count();
-    update_challenge_button();
+    update_buttons();
     net_request(CMD_LIST_PLAYERS, on_list_reply, NULL);   /* the snapshot; events do the rest */
 }
 
 void ui_lobby_reset(void)
 {
     close_all_dialogs();
+    lb.pending = FALSE;
     gtk_list_store_clear(store);
     notice_clear();
 }
@@ -634,14 +949,20 @@ GtkWidget *ui_lobby_new(void)
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     g_object_set(page, "margin", 20, NULL);
 
-    /* top bar: who I am + logout */
+    /* top bar: who I am + history, leaderboard, logout */
     GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     l_user = gtk_label_new(NULL);
     gtk_widget_set_halign(l_user, GTK_ALIGN_START);
+    b_history = gtk_button_new_with_label("Lịch sử");
+    g_signal_connect(b_history, "clicked", G_CALLBACK(on_history_clicked), NULL);
+    b_leaderboard = gtk_button_new_with_label("Bảng xếp hạng");
+    g_signal_connect(b_leaderboard, "clicked", G_CALLBACK(on_leaderboard_clicked), NULL);
     b_logout = gtk_button_new_with_label("Đăng xuất");
     g_signal_connect(b_logout, "clicked", G_CALLBACK(on_logout_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(top), l_user, TRUE, TRUE, 0);
     gtk_box_pack_end(GTK_BOX(top), b_logout, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(top), b_leaderboard, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(top), b_history, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), top, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
 
@@ -666,16 +987,19 @@ GtkWidget *ui_lobby_new(void)
     gtk_container_add(GTK_CONTAINER(scroll), tree);
     gtk_box_pack_start(GTK_BOX(page), scroll, TRUE, TRUE, 0);
 
-    /* bottom: notice + challenge */
+    /* bottom: notice + quick match + challenge */
     GtkWidget *bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     l_notice = gtk_label_new(NULL);
     gtk_label_set_line_wrap(GTK_LABEL(l_notice), TRUE);
     gtk_label_set_xalign(GTK_LABEL(l_notice), 0.0f);
+    b_quick = gtk_button_new_with_label("Tìm trận nhanh");
+    g_signal_connect(b_quick, "clicked", G_CALLBACK(on_quick_clicked), NULL);
     b_challenge = gtk_button_new_with_label("Thách đấu");
     gtk_style_context_add_class(gtk_widget_get_style_context(b_challenge), "suggested-action");
     g_signal_connect(b_challenge, "clicked", G_CALLBACK(on_challenge_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bottom), l_notice, TRUE, TRUE, 0);
     gtk_box_pack_end(GTK_BOX(bottom), b_challenge, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(bottom), b_quick, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), bottom, FALSE, FALSE, 0);
 
     if (app.fake_mode) {
@@ -684,7 +1008,8 @@ GtkWidget *ui_lobby_new(void)
             "<small>Chế độ offline: <b>han</b> nhận lời · <b>tuan</b> từ chối · <b>lan</b> không trả "
             "lời (hết hạn sau 30 giây) · <b>minh</b> đang chơi (409), rảnh sau 6 giây, offline sau "
             "15 giây. <b>Ctrl+I</b>: nhận một lời mời giả · <b>Ctrl+U</b>: lời mời giả bị hủy sau "
-            "5 giây.</small>");
+            "5 giây. <b>Tìm trận nhanh</b>: ghép sau khoảng 3 giây · <b>Ctrl+M</b>: lần Hủy tìm "
+            "trận tiếp theo tới server ngay sau khi đã ghép xong (thử tranh chấp).</small>");
         gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
         gtk_label_set_xalign(GTK_LABEL(hint), 0.0f);
         gtk_box_pack_start(GTK_BOX(page), hint, FALSE, FALSE, 0);

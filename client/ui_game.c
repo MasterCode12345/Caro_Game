@@ -37,8 +37,15 @@
  *   W/L/D shown there come from the server, the client never adds or subtracts itself.
  *   Every event whose gid is not the game on screen (OPP_MOVE, DRAW_OFFERED, ...) is ignored.
  *
- * TODO(C5): countdown of the current move (g_timeout_add_seconds 1), reset after every move;
- *           display only, the server decides TIMEOUT.
+ * MOVE COUNTDOWN — display only (protocol.md §8: the server decides TIMEOUT)
+ *   Starts from GAME_START's sec_per_move (a rematch's GAME_START starts it again), restarts
+ *   after 200|MOVE and after OPP_MOVE — the moments the server resets its own move timer — and
+ *   stops at GAME_END or when we leave. A g_timeout_add_seconds(1) source redraws it, but the
+ *   number shown is computed from a deadline on the monotonic clock, not by counting ticks:
+ *   GLib may fire a seconds-timeout a little early or late (it groups them to save wake-ups),
+ *   and counting ticks would drift. Rounding the remaining time UP means 0 is never shown before
+ *   the deadline. At 0 the clock stays red at 0 and the source is removed; the GAME_END
+ *   (TIMEOUT) comes from the server. The other player's screen counts the same way.
  */
 #include <stdarg.h>
 #include <string.h>
@@ -54,9 +61,10 @@
  * which would widen the panel and shrink the board: wrapping labels get a max width in chars. */
 #define SIDE_WIDTH       250
 #define SIDE_WRAP_CHARS  30
+#define CLOCK_WARN_SEC   5      /* the countdown turns red at 5 seconds or less */
 
 static BoardView *bv;
-static GtkWidget *l_title, *l_me, *l_opp, *l_turn, *l_moves, *l_notice;
+static GtkWidget *l_title, *l_me, *l_opp, *l_turn, *l_clock, *l_moves, *l_notice;
 static GtkWidget *b_resign, *b_draw, *b_rematch, *b_leave;
 
 /* At most one of each. Every dialog uses the "response" signal, never gtk_dialog_run(). */
@@ -71,6 +79,12 @@ static struct {
     char     outcome;          /* 'W' win, 'L' loss, 'D' draw */
     char     reason[24];       /* END_FIVE, END_RESIGN, ... as received */
 } end;
+
+static struct {
+    gboolean running;          /* counting for the current move */
+    gint64   deadline_us;      /* g_get_monotonic_time() at which the mover runs out of time */
+    guint    source_id;        /* g_timeout_add_seconds() source, 0 = none */
+} move_clock;
 
 typedef enum { OFFER_NONE, OFFER_SENDING, OFFER_PENDING } OfferState;
 
@@ -126,18 +140,6 @@ static void notice(NoteKind kind, const char *fmt, ...)
 static void notice_clear(void)
 {
     gtk_label_set_text(GTK_LABEL(l_notice), "");
-}
-
-/* "7,11" -> 7, 11 (in place) */
-static gboolean parse_rc(char *s, int *r, int *c)
-{
-    char *comma = strchr(s, ITEM_SEP);
-    if (comma == NULL)
-        return FALSE;
-    *comma = '\0';
-    gboolean ok = field_int(s, r) && field_int(comma + 1, c);
-    *comma = ITEM_SEP;
-    return ok;
 }
 
 /* A response to a request sent for game `data` (GINT_TO_POINTER(gid)) that still concerns the
@@ -245,6 +247,69 @@ static int dialog_gid(GtkDialog *dialog)
     return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(dialog), "gid"));
 }
 
+/* ---- move countdown ---------------------------------------------------------------------------------- */
+
+/* Whole seconds left for the current move, rounded up; 0 once the deadline has passed. */
+static int clock_left(void)
+{
+    gint64 left_us = move_clock.deadline_us - g_get_monotonic_time();
+    return left_us <= 0 ? 0 : (int)((left_us + G_USEC_PER_SEC - 1) / G_USEC_PER_SEC);
+}
+
+static void clock_show(void)
+{
+    if (!move_clock.running) {
+        gtk_label_set_text(GTK_LABEL(l_clock), "");
+        return;
+    }
+    int left = clock_left();
+    gboolean mine = app.game.turn == app.game.my_symbol;
+    char *markup = g_strdup_printf("<span foreground='%s'>%s còn <span size='x-large'><b>%d</b>"
+                                   "</span> giây</span>",
+                                   left <= CLOCK_WARN_SEC ? "#c01c28" : "#3d3846",
+                                   mine ? "Bạn" : "Đối thủ", left);
+    gtk_label_set_markup(GTK_LABEL(l_clock), markup);
+    g_free(markup);
+}
+
+static gboolean on_clock_tick(gpointer data)
+{
+    (void)data;
+    clock_show();
+    if (clock_left() > 0)
+        return G_SOURCE_CONTINUE;
+    move_clock.source_id = 0;                     /* stays at 0 until the server's GAME_END */
+    return G_SOURCE_REMOVE;
+}
+
+static void clock_remove_source(void)
+{
+    if (move_clock.source_id != 0) {
+        g_source_remove(move_clock.source_id);
+        move_clock.source_id = 0;
+    }
+}
+
+static void clock_stop(void)
+{
+    clock_remove_source();
+    move_clock.running = FALSE;
+    clock_show();
+}
+
+/* A new move begins: full sec_per_move again for the player to move. */
+static void clock_restart(void)
+{
+    clock_remove_source();
+    int sec = app.game.sec_per_move;
+    move_clock.running = app.game.active && !app.game.ended && sec > 0;
+    if (move_clock.running) {
+        move_clock.deadline_us = g_get_monotonic_time() + (gint64)sec * G_USEC_PER_SEC;
+        move_clock.source_id = g_timeout_add_seconds(1, on_clock_tick, NULL);
+    }
+    clock_show();
+}
+
 /* ---- side panel ------------------------------------------------------------------------------------ */
 
 static void set_player(GtkWidget *label, gboolean to_move, char sym, const char *name,
@@ -339,6 +404,8 @@ static void update_panel(void)
     gtk_label_set_markup(GTK_LABEL(l_turn), t);
     g_free(t);
 
+    clock_show();                            /* "Bạn còn" / "Đối thủ còn" follows the turn */
+
     char moves[48];
     snprintf(moves, sizeof moves, "Số nước đã đi: %d", g->move_no);
     gtk_label_set_text(GTK_LABEL(l_moves), moves);
@@ -391,6 +458,7 @@ static void on_move_reply(int code, char **f, int n, gpointer data)
         g->move_no = n >= 3 && field_int(f[2], &move_no) ? move_no : g->move_no + 1;
         g->turn = opp_symbol();
         move_cancels_draw_offers();
+        clock_restart();                     /* the server reset its move timer: now theirs */
     } else if (!g->ended) {                  /* after GAME_END a refused move needs no message */
         const char *text = move_error_text(code);
         if (text != NULL)
@@ -448,6 +516,7 @@ static void back_to_lobby(void)
 {
     GameInfo *g = &app.game;
     close_all_dialogs();
+    clock_stop();
     g->left = !g->ended;                     /* its GAME_END is still on the way (§3) */
     g->active = FALSE;
     memset(&ctl, 0, sizeof ctl);
@@ -731,6 +800,7 @@ static void on_opp_move(char **f, int n)
     g->move_no = move_no;
     g->turn = g->my_symbol;
     move_cancels_draw_offers();
+    clock_restart();                         /* our move now, full time again */
     update_panel();
 }
 
@@ -798,10 +868,11 @@ static void on_game_end(char **f, int n)
 
     g->ended = TRUE;
     g->move_pending = FALSE;
+    clock_stop();
     if (strcmp(reason, END_FIVE) == 0) {     /* the five winning cells follow */
         int cells[WIN_LENGTH][2], k = 0;
         for (int i = 6; i < n && k < WIN_LENGTH; i++)
-            if (parse_rc(f[i], &cells[k][0], &cells[k][1]))
+            if (field_rc(f[i], &cells[k][0], &cells[k][1]))
                 k++;
         if (k != WIN_LENGTH)
             g_printerr("caro_client: warning: GAME_END FIVE with %d valid cells\n", k);
@@ -849,6 +920,7 @@ void ui_game_enter(void)
     g->move_no = 0;
     g->move_pending = FALSE;
     g->ended = FALSE;
+    clock_restart();                         /* from sec_per_move, also after a rematch */
     if (rematch)
         notice(NOTE_INFO, "Đấu lại: ván mới #%d, bạn cầm %c%s", g->gid, g->my_symbol,
                g->my_symbol == 'X' ? " và đi trước" : "");
@@ -860,6 +932,7 @@ void ui_game_enter(void)
 void ui_game_reset(void)
 {
     close_all_dialogs();
+    clock_stop();
     memset(&ctl, 0, sizeof ctl);
 }
 
@@ -910,6 +983,7 @@ GtkWidget *ui_game_new(void)
     l_opp = side_label(side, FALSE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
     l_turn = side_label(side, TRUE);
+    l_clock = side_label(side, FALSE);
     l_moves = side_label(side, FALSE);
     l_notice = side_label(side, TRUE);
 

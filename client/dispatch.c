@@ -12,10 +12,9 @@
  *
  * EVENTS — messages whose first field is not a number (PLAYER_STATUS, GAME_START, ...) are
  *   unrequested, so they never touch the queue: they are looked up by name in a table filled
- *   with dispatch_on() at start-up.
- *
- * TODO(C2–C5): pages register their events: PLAYER_STATUS, CHALLENGE_*, GAME_START, OPP_MOVE,
- *              DRAW_*, REMATCH_*, GAME_END, OPP_LEFT.
+ *   with dispatch_on() at start-up: ui_lobby.c (PLAYER_STATUS, CHALLENGE_*, GAME_START) and
+ *   ui_game.c (OPP_MOVE, DRAW_*, REMATCH_*, GAME_END, OPP_LEFT). The history page has no
+ *   events: HISTORY, REPLAY and LEADERBOARD are plain request/response.
  */
 #include "dispatch.h"
 
@@ -49,6 +48,32 @@ gboolean field_int(const char *s, int *out)
         return FALSE;
     *out = (int)v;
     return TRUE;
+}
+
+gboolean field_rc(const char *s, int *row, int *col)
+{
+    const char *comma = s != NULL ? strchr(s, ITEM_SEP) : NULL;
+    if (comma == NULL || comma - s > 15)
+        return FALSE;
+    char first[16];
+    memcpy(first, s, (size_t)(comma - s));
+    first[comma - s] = '\0';
+    return field_int(first, row) && field_int(comma + 1, col);
+}
+
+int item_split(char *item, char *parts[], int max)
+{
+    int k = 0;
+    parts[k++] = item;
+    for (char *p = item; *p != '\0'; p++) {
+        if (*p != ITEM_SEP)
+            continue;
+        if (k == max)
+            return max + 1;
+        *p = '\0';
+        parts[k++] = p + 1;
+    }
+    return k;
 }
 
 static gboolean is_status_code(const char *s)

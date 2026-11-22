@@ -7,7 +7,8 @@
  * size at every paint, so the board follows the window when it is resized. Marks sit inside
  * the cells (Caro style); row/col count from 0 at the top-left, as in docs/protocol.md §2.
  *
- * TODO(C5): the replay viewer uses its own BoardView with interactive = FALSE.
+ * The game page and the replay viewer (ui_history.c) each own one BoardView; the replay one is
+ * never made interactive, so it ignores clicks and shows no hover.
  */
 #include "board_view.h"
 

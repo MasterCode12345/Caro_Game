@@ -111,3 +111,22 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   rematch declined then accepted with swapped symbols, Ctrl+D/R dialogs, resign and leave
   confirmations, lobby ELO and W/L/D after leaving, Ctrl+L/K/T end reasons), no ASan report;
   C4 ticked. Lost-server check in a game with the real server waits for S2–S4.
+- 2026-11-22 · Nghĩa · C5 code: history page (`ui_history.c`): HISTORY|page table (opponent,
+  symbol, Thắng/Thua/Hòa, reason, time), Trang trước off on page 1, Trang sau off under 10 rows;
+  one click -> REPLAY|mid -> read-only BoardView with ⏮ ◀ ▶ ⏭ and Tự chạy (g_timeout_add 700 ms,
+  removed on every way out, also when GAME_START comes while watching from the queue),
+  "Nước k / n", X/O names, result + reason, winning line found again on the last move of a FIVE
+  game; responses from an earlier visit dropped. Lobby: Lịch sử, Bảng xếp hạng (LEADERBOARD|10
+  dialog, own row bold), Tìm trận nhanh (FIND_MATCH -> "Đang tìm đối thủ…" with seconds waited,
+  Hủy -> CANCEL_MATCH; off while our challenge is pending; challenges off in the queue; received
+  invitations closed at 200|FIND_MATCH; GAME_START then 403|CANCEL_MATCH -> the 403 is ignored).
+  Game page: move countdown from sec_per_move (monotonic deadline, g_timeout_add_seconds 1),
+  restarted on 200|MOVE, OPP_MOVE and a rematch, stopped at GAME_END / leave / lost server, red at
+  ≤ 5 s. Fake: 12 scripted games (2 pages; mid 112 = 20 moves won by O with FIVE) + every fake
+  game played, REPLAY, LEADERBOARD, FIND_MATCH (~3 s, 30 s per move, X and O in turn),
+  CANCEL_MATCH, Ctrl+M race hook. Headless under ASan/UBSan: 217 checks (pages, every replay
+  button, auto-play timing and removal, late and malformed HISTORY/REPLAY/LEADERBOARD, clock
+  values and colour, quick match / cancel / race / blocked cases, queue + history + GAME_START,
+  logout and lost server in the queue, in a game, while replaying) + rendered PNGs checked;
+  `make debug` binary started clean. C5 not ticked yet: waits for the GUI click-through in fake
+  mode. Checks with the real server wait for S6–S7.

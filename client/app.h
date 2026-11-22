@@ -5,9 +5,8 @@
  *
  * Everything runs in the one GLib main-loop thread, so `app` needs no locking.
  *
- * Page-local state (lobby list, challenge dialogs, ...) lives in its ui_*.c file.
- *
- * TODO(C5): history page and replay state; countdown timer source id.
+ * Page-local state (lobby list, challenge and quick-match dialogs, the move countdown, the
+ * history list and the replay viewer, ...) lives in its ui_*.c file.
  */
 #ifndef CARO_CLIENT_APP_H
 #define CARO_CLIENT_APP_H
@@ -70,5 +69,12 @@ void       ui_lobby_request_stats(void);   /* STATS: the server's ELO and W/L/D 
 GtkWidget *ui_game_new(void);
 void       ui_game_enter(void);            /* called by app_show_page("game"): new board */
 void       ui_game_reset(void);            /* session over: close every dialog of the page */
+
+/* ui_history.c — page "history": HISTORY list + REPLAY viewer */
+GtkWidget *ui_history_new(void);
+void       ui_history_enter(void);         /* called by app_show_page("history"): page 1 */
+void       ui_history_leave(void);         /* another page is shown: stop auto-play, drop late
+                                              HISTORY / REPLAY responses */
+void       ui_history_reset(void);         /* session over: also empty the list */
 
 #endif /* CARO_CLIENT_APP_H */
