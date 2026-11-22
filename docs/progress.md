@@ -13,7 +13,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **C2** (21–22/11) lobby page, challenge dialogs
 - [x] **C3** (23–24/11) board view, moves, result
 - [x] **C4** (25–26/11) game controls, disconnect handling
-- [ ] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
+- [x] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
 - [ ] **C6** (29/11) bot, LAN test, polish
 
 ## Server — Hân (`server/`)
@@ -130,3 +130,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   logout and lost server in the queue, in a game, while replaying) + rendered PNGs checked;
   `make debug` binary started clean. C5 not ticked yet: waits for the GUI click-through in fake
   mode. Checks with the real server wait for S6–S7.
+- 2026-11-22 · Nghĩa · C5: GUI click-through in fake mode passed (leaderboard with own row in
+  bold, history pages, replay buttons and Tự chạy, countdown reset and red at ≤ 5 s, quick match,
+  cancel, Ctrl+M race, blocked cases, invitations closed when entering the queue), no ASan
+  report; C5 ticked. Still to check with the real server once S7 is done (the fake pairs after
+  3 s, too fast to try): opening Lịch sử while searching (GAME_START from the history page stops
+  the replay) and Đăng xuất while searching.
