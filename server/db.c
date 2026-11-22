@@ -6,10 +6,11 @@
  * All SQL uses sqlite3_prepare_v2 + sqlite3_bind_*. Never build SQL from user strings.
  */
 #include "db.h"
+#include "proto.h"
 
 #include <stdio.h>
 #include <string.h>
-
+#include <time.h>
 #define ELO_START 1000
 
 /* Single SQLite connection: the server uses one select() loop. */
@@ -217,4 +218,150 @@ int db_user_get(const char *username, UserRow *out)
 
     sqlite3_finalize(stmt);
     return 1; /* User found */
+}
+
+/* ---------------------------------------------------------------------------------------
+ * S5: finished matches
+ * ------------------------------------------------------------------------------------- */
+
+/* t as local time 'YYYY-MM-DD HH:MM:SS' (19 characters + '\0'; cap must be >= 20). */
+static void format_local_time(time_t t, char *out, size_t cap)
+{
+    struct tm tm_local;
+
+    if (localtime_r(&t, &tm_local) == NULL ||
+        strftime(out, cap, "%Y-%m-%d %H:%M:%S", &tm_local) == 0)
+        snprintf(out, cap, "1970-01-01 00:00:00");
+}
+
+/* Add the result of one game to one user: elo += d_elo and one of wins / losses / draws += 1.
+ * Relative updates, so the row is right even if it changed since the user logged in. */
+static int user_apply_result(int user_id, int d_elo, int d_win, int d_loss, int d_draw)
+{
+    const char *sql =
+        "UPDATE users SET elo = elo + ?, wins = wins + ?, losses = losses + ?,"
+        " draws = draws + ? WHERE id = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[DB] Prepare user update failed: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, d_elo);
+    sqlite3_bind_int(stmt, 2, d_win);
+    sqlite3_bind_int(stmt, 3, d_loss);
+    sqlite3_bind_int(stmt, 4, d_draw);
+    sqlite3_bind_int(stmt, 5, user_id);
+
+    int ok = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1);
+
+    if (!ok)
+        fprintf(stderr, "[DB] Update user %d failed: %s\n", user_id, sqlite3_errmsg(db));
+
+    sqlite3_finalize(stmt);
+    return ok ? 0 : -1;
+}
+
+int db_match_save(int x_user, int o_user, int board_size, int sec_per_move,
+                  const char *result, const char *reason,
+                  int delta_x, int delta_o,
+                  time_t started_at, time_t ended_at,
+                  const int moves[][2], int move_count)
+{
+    if (db == NULL || result == NULL || reason == NULL || move_count < 0 ||
+        (move_count > 0 && moves == NULL))
+        return -1;
+
+    /* Who gained what: X_WIN / O_WIN / DRAW decide wins, losses and draws of both users. */
+    int x_win = 0, x_loss = 0, draw = 0;
+
+    if (strcmp(result, RES_X_WIN) == 0)
+        x_win = 1;
+    else if (strcmp(result, RES_O_WIN) == 0)
+        x_loss = 1;
+    else if (strcmp(result, RES_DRAW) == 0)
+        draw = 1;
+    else
+        return -1;
+
+    char started[20], ended[20];
+
+    format_local_time(started_at, started, sizeof(started));
+    format_local_time(ended_at, ended, sizeof(ended));
+
+    if (db_exec("BEGIN;") != 0)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_int64 match_id;
+
+    /* 1. the match row */
+    const char *sql_match =
+        "INSERT INTO matches (x_user, o_user, board_size, sec_per_move, result, reason,"
+        " elo_delta_x, elo_delta_o, started_at, ended_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+
+    if (sqlite3_prepare_v2(db, sql_match, -1, &stmt, NULL) != SQLITE_OK)
+        goto fail;
+
+    sqlite3_bind_int(stmt, 1, x_user);
+    sqlite3_bind_int(stmt, 2, o_user);
+    sqlite3_bind_int(stmt, 3, board_size);
+    sqlite3_bind_int(stmt, 4, sec_per_move);
+    sqlite3_bind_text(stmt, 5, result, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, reason, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 7, delta_x);
+    sqlite3_bind_int(stmt, 8, delta_o);
+    sqlite3_bind_text(stmt, 9, started, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, ended, -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE)
+        goto fail;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    match_id = sqlite3_last_insert_rowid(db);
+
+    /* 2. every move: X plays the odd move numbers, O the even ones */
+    const char *sql_move =
+        "INSERT INTO moves (match_id, move_no, symbol, row, col) VALUES (?, ?, ?, ?, ?);";
+
+    if (sqlite3_prepare_v2(db, sql_move, -1, &stmt, NULL) != SQLITE_OK)
+        goto fail;
+
+    for (int i = 0; i < move_count; i++) {
+        sqlite3_reset(stmt);
+        sqlite3_bind_int64(stmt, 1, match_id);
+        sqlite3_bind_int(stmt, 2, i + 1);
+        sqlite3_bind_text(stmt, 3, (i % 2 == 0) ? "X" : "O", -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 4, moves[i][0]);
+        sqlite3_bind_int(stmt, 5, moves[i][1]);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE)
+            goto fail;
+    }
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    /* 3. elo and win / loss / draw counters of both players */
+    if (user_apply_result(x_user, delta_x, x_win, x_loss, draw) != 0 ||
+        user_apply_result(o_user, delta_o, x_loss, x_win, draw) != 0)
+        goto fail;
+
+    if (db_exec("COMMIT;") != 0)
+        goto fail;
+
+    return (int)match_id;
+
+fail:
+    fprintf(stderr, "[DB] Saving match failed: %s\n", sqlite3_errmsg(db));
+
+    if (stmt != NULL)
+        sqlite3_finalize(stmt);
+
+    db_exec("ROLLBACK;");
+    return -1;
 }

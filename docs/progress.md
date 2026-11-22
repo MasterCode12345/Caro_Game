@@ -22,8 +22,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **S1** (19–20/11) SQLite, REGISTER/LOGIN/LOGOUT, sessions
 - [x] **S2** (21–22/11) lobby, challenges, expiry
 - [x] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
-- [ ] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
-- [ ] **S5** (25–26/11) DB + ELO
+- [x] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
+- [x] **S5** (25–26/11) DB + ELO
 - [ ] **S6** (27–28/11) history/replay/leaderboard
 - [ ] **S7** (27–28/11) matchmaking, timers
 - [ ] **S8** (29/11) valgrind, malformed input, load
@@ -223,3 +223,11 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   50 scripted checks on an ASan/UBSan build (all five ways to end a game, declined draw, declined
   and accepted rematch, leave, disconnect of one or both players, 12 clients closing together),
   `make` zero warnings, `make test` passed.
+- 2026-11-22 · Hân · S5: `db_match_save()` writes the match, all its moves and the elo / W-L-D of both
+  users in ONE transaction (ROLLBACK on error). `game_end()` rates every finished game (FIVE,
+  BOARD_FULL, RESIGN, DRAW_AGREED, DISCONNECT) with `elo_update()`, saves it, updates both Clients and
+  sends GAME_END with the real new ELO and delta; a player who just disconnected is rated and saved
+  too. `PLAYER_STATUS` after a game and OFFLINE carry the new ELO. `game_start()` / `game_end()` log
+  one line each. Checked with 27 scripted checks (1000 vs 1000 → +16 / −16, RESIGN, DRAW,
+  DISCONNECT, rows in matches / moves / users, restart keeps the ELO) on an ASan/UBSan build,
+  S4 regression passed, `make` zero warnings, `make test` passed.

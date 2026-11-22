@@ -28,6 +28,9 @@
 #include "match.h"
 #include "lobby.h"
 #include "net.h"
+#include "db.h"
+#include "elo.h"
+#include "log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,7 +145,8 @@ void game_start(Client *x, Client *o, int size, int sec)
     snprintf(xname, sizeof(xname), "%s", x->username);
     snprintf(oname, sizeof(oname), "%s", o->username);
     int xelo = x->elo, oelo = o->elo;
-
+    
+    log_event("game start: gid=%d %s(X) vs %s(O) size=%d sec=%d", gid, xname, oname, size, sec);
     send_event(x, EV_GAME_START "|%d|%d|" SYM_X "|%s|%d|%d", gid, size, oname, oelo, sec);
     send_event(o, EV_GAME_START "|%d|%d|" SYM_O "|%s|%d|%d", gid, size, xname, xelo, sec);
 
@@ -150,6 +154,54 @@ void game_start(Client *x, Client *o, int size, int sec)
         broadcast_status(x, xname, PS_IN_GAME, xelo);
     if (o->fd >= 0)
         broadcast_status(o, oname, PS_IN_GAME, oelo);
+}
+
+/* Rate a finished game and store it. Everything that changes (database, ELO, W-L-D of both
+ * Clients) is done HERE, before game_end() sends anything, because a send can end a session.
+ * delta[0] is X's ELO change, delta[1] is O's. Returns the match id, or -1 when nothing was
+ * saved: then no ELO changes either, so memory and database never disagree. */
+static int settle_game(Game *g, char result, const char *res, const char *reason, int delta[2])
+{
+    delta[0] = 0;
+    delta[1] = 0;
+
+    Client *x = g->x, *o = g->o;
+
+    if (x == NULL || o == NULL)         /* a running game always has both players */
+        return -1;
+
+    /* A player whose connection just dropped is still here: session_end() sets fd = -1 first
+     * but keeps user_id, elo and the counters until game_detach() has returned. */
+    double score_x = (result == CELL_X) ? 1.0 : (result == CELL_O) ? 0.0 : 0.5;
+    int dx = elo_update(x->elo, o->elo, score_x) - x->elo;
+    int d_o = -dx;                      /* zero sum: protocol section 9, delta_B = -delta_A */
+
+    int match_id = db_match_save(x->user_id, o->user_id, g->board.size, g->sec,
+                                 res, reason, dx, d_o, g->started_at, time(NULL),
+                                 (const int (*)[2])g->moves, g->board.move_count);
+
+    if (match_id < 0) {
+        log_event("game %d: saving the match failed, no ELO change", g->id);
+        return -1;
+    }
+
+    x->elo += dx;
+    o->elo += d_o;
+
+    if (result == CELL_X) {
+        x->wins++;
+        o->losses++;
+    } else if (result == CELL_O) {
+        o->wins++;
+        x->losses++;
+    } else {
+        x->draws++;
+        o->draws++;
+    }
+
+    delta[0] = dx;
+    delta[1] = d_o;
+    return match_id;
 }
 
 void game_end(Game *g, char result, const char *reason, const int line[5][2])
@@ -164,6 +216,23 @@ void game_end(Game *g, char result, const char *reason, const int line[5][2])
                       (result == CELL_O) ? RES_O_WIN : RES_DRAW;
     int gid = g->id;
     Client *player[2] = { g->x, g->o };
+
+    int delta[2];
+    int match_id = settle_game(g, result, res, reason, delta);
+
+    /* Copy what the sends below need: a failed send ends that session and resets the slot. */
+    char name[2][USERNAME_MAX + 1] = { "", "" };
+    int new_elo[2] = { 0, 0 };
+
+    for (int i = 0; i < 2; i++) {
+        if (player[i] == NULL)
+            continue;
+        snprintf(name[i], sizeof(name[i]), "%s", player[i]->username);
+        new_elo[i] = player[i]->elo;
+    }
+
+    log_event("game end: gid=%d match=%d %s(X) vs %s(O) result=%s reason=%s delta_x=%+d delta_o=%+d",
+              gid, match_id, name[0], name[1], res, reason, delta[0], delta[1]);
 
     /* The five winning cells are sent only for FIVE. Copy them: line may point into the
      * caller's stack, which is fine, but a copy keeps this loop independent of it. */
@@ -185,11 +254,19 @@ void game_end(Game *g, char result, const char *reason, const int line[5][2])
         if (p == NULL || p->fd < 0)     /* left, or his session ended during this loop */
             continue;
 
-        char delta[16];
-        fmt_delta(0, delta, sizeof(delta));     /* TODO(S5): real ELO change */
+        char d[16];
+        fmt_delta(delta[i], d, sizeof(d));
 
         send_event(p, EV_GAME_END "|%d|%s|%s|%d|%s%s",
-                   gid, res, reason, p->elo, delta, cells);
+                   gid, res, reason, new_elo[i], d, cells);
+    }
+
+    /* The ELO changed: tell everybody else the new value. Both players are still IN_GAME. */
+    for (int i = 0; i < 2; i++) {
+        Client *p = player[i];
+
+        if (p != NULL && p->fd >= 0)
+            broadcast_status(p, name[i], PS_IN_GAME, new_elo[i]);
     }
 }
 

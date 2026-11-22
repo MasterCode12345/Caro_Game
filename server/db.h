@@ -10,7 +10,7 @@
 #define CARO_SERVER_DB_H
 
 #include <sqlite3.h>
-
+#include <time.h>
 /* Return codes */
 #define DB_EXISTS 1
 
@@ -43,5 +43,16 @@ int db_user_create(const char *username, const char *salt, const char *hash);
  * Returns 1 if found, 0 if not found, -1 on error.
  */
 int db_user_get(const char *username, UserRow *out);
-
+/*
+ * Save one finished match in ONE transaction: a row in matches, every move in moves, and the
+ * elo / wins / losses / draws of both users (elo changes by delta_x / delta_o).
+ * result: RES_X_WIN, RES_O_WIN or RES_DRAW. moves[i] = {row, col}, moves[0] is the first move
+ * (X), the symbols alternate. Times are stored as local time 'YYYY-MM-DD HH:MM:SS'.
+ * Returns the match id (> 0), or -1 on error; on error nothing is written (ROLLBACK).
+ */
+int db_match_save(int x_user, int o_user, int board_size, int sec_per_move,
+                  const char *result, const char *reason,
+                  int delta_x, int delta_o,
+                  time_t started_at, time_t ended_at,
+                  const int moves[][2], int move_count);
 #endif /* CARO_SERVER_DB_H */
