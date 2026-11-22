@@ -32,8 +32,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 
 - [x] **M0** (18/11) 3 `cli` PING concurrently; split/glued frames OK
 - [x] **M1** (20/11) register/login from GTK; 401, 409 shown
-- [ ] **M2** (22/11) two machines see each other, challenge → GAME_START
-- [ ] **M3** (24/11) full game between two machines; bad moves rejected
+- [x] **M2** (22/11) two machines see each other, challenge → GAME_START
+- [x] **M3** (24/11) full game between two machines; bad moves rejected
 - [ ] **M4** (26/11) every ending correct, ELO persists after restart
 - [ ] **M5** (28/11) all graded features work
 - [ ] **Code freeze** (29/11) after the full test table passes
@@ -185,3 +185,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   `session_end()`: two clients closing together recursed hundreds of times (fd is now set to -1
   first). Checked with 57 scripted checks (incl. a 225-move draw) on an ASan/UBSan build, S2
   regression 36/36, `make test` passed, zero warnings.
+- 2026-11-22 · Nghĩa + Hân · M2 and M3 reached with Hân's real server (S2, S3), two GTK client
+  windows: both players see each other in the lobby; challenge, decline, cancel and the 30 s
+  expiry; accept -> GAME_START with the challenger as X; the client blocks clicks when it is not
+  your turn and on an occupied cell; a five-in-a-row win shows the winning line on both sides;
+  Về sảnh works. Stopping the server during a game sends both clients back to the login page
+  (the lost-server check C4 was waiting for).
