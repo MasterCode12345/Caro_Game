@@ -12,7 +12,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **C1** (19–20/11) net layer, dispatch, fake mode, login page
 - [x] **C2** (21–22/11) lobby page, challenge dialogs
 - [x] **C3** (23–24/11) board view, moves, result
-- [ ] **C4** (25–26/11) game controls, disconnect handling
+- [x] **C4** (25–26/11) game controls, disconnect handling
 - [ ] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
 - [ ] **C6** (29/11) bot, LAN test, polish
 
@@ -107,3 +107,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   2 requests pending and with LOGIN pending; LEAVE 200 then GAME_END 0.4 s later) + rendered
   PNGs checked. C4 not ticked yet: waits for the GUI click-through in fake mode. STATS needs the
   server's handler (S6): until then the lobby shows an error notice after a game.
+- 2026-11-22 · Nghĩa · C4: GUI click-through in fake mode passed (draw declined then agreed,
+  rematch declined then accepted with swapped symbols, Ctrl+D/R dialogs, resign and leave
+  confirmations, lobby ELO and W/L/D after leaving, Ctrl+L/K/T end reasons), no ASan report;
+  C4 ticked. Lost-server check in a game with the real server waits for S2–S4.
