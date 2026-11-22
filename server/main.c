@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "log.h"
 #include "db.h"
+#include "lobby.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,10 +34,11 @@
 
 Client clients[MAX_CLIENTS];
 
-/* S0: no timer tasks yet. S2/S7 will extend this function. */
+/* Timer tasks, run after every select() round (select has a 1 s timeout, so at most ~1 s
+ * late). S2: challenge expiry. S7 will add matchmaking and the move timer. */
 static void tick(time_t now)
 {
-    (void)now;
+    lobby_tick(now);
 }
 
 static int parse_port(const char *arg, int *port)
@@ -217,7 +219,7 @@ int main(int argc, char *argv[])
             }
         }
 
-        /* S0: currently empty; S2/S7 will use this for timers. */
+        /* Timers: challenge expiry (S2); matchmaking and move clock follow in S7. */
         tick(time(NULL));
     }
 

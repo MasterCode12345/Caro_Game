@@ -252,6 +252,9 @@ void handle_logout(Client *c, char *fields[], int nfields)
 
     snprintf(username, sizeof(username), "%s", c->username);
 
+    /* Pending challenges involving this player are cancelled (protocol.md 6.2). */
+    challenges_drop_for(c);
+
     /* Send response before broadcasting OFFLINE. */
     reply(c, ST_OK, CMD_LOGOUT, NULL);
 

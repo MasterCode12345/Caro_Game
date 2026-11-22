@@ -3,6 +3,7 @@
  * Owner: Hân.
  *
  * S0: Client table and shared client data for the select() loop.
+ * S2: Challenge struct.
  * Later stages extend Client with account, challenge, game and matchmaking data.
  */
 #ifndef CARO_SERVER_H
@@ -42,6 +43,18 @@ typedef struct Client {
     /* S7: matchmaking queue timestamp */
     time_t queued_at;
 } Client;
+
+/* S2: a pending invitation (docs/protocol.md 6.2). Static table in lobby.c, ids from 1.
+ * `used` = 0 means the slot is free. Pointers stay valid because clients[] is a static array. */
+typedef struct {
+    int id;
+    Client *from;                   /* challenger: plays X */
+    Client *to;                     /* target: the only one who may reply */
+    int size;
+    int sec;
+    time_t expires;                 /* created + CHALLENGE_EXPIRE_SEC */
+    int used;
+} Challenge;
 
 extern Client clients[MAX_CLIENTS];
 

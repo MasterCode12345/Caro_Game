@@ -2,12 +2,15 @@
  * server/protocol.c — protocol command dispatch.
  * Owner: Hân.
  *
+ * S2: LIST_PLAYERS, CHALLENGE, CHALLENGE_REPLY, CHALLENGE_CANCEL, LEAVE_GAME (stub).
  * S1: REGISTER, LOGIN, LOGOUT.
  * S0: command table, state checks and PING.
  */
 #include "protocol.h"
 #include "auth.h"
 #include "net.h"
+#include "lobby.h"
+#include "match.h"
 
 #include <string.h>
 
@@ -21,6 +24,12 @@
 #define AUTH_STATES (STATE_BIT(SESSION_CONNECTED))
 #define LOGOUT_STATES (STATE_BIT(SESSION_LOBBY) | \
                       STATE_BIT(SESSION_IN_QUEUE))
+
+#define LOBBY_ONLY    (STATE_BIT(SESSION_LOBBY))
+#define IN_GAME_ONLY  (STATE_BIT(SESSION_IN_GAME))
+#define LOGGED_IN     (STATE_BIT(SESSION_LOBBY) | \
+                      STATE_BIT(SESSION_IN_QUEUE) | \
+                      STATE_BIT(SESSION_IN_GAME))
 
 typedef void (*CommandHandler)(Client *c, char *fields[], int nfields);
 
@@ -46,7 +55,12 @@ static const Command commands[] = {
     { "PING",     ALL_STATES,    1, 1, handle_ping },
     { "REGISTER", AUTH_STATES,   3, 3, handle_register },
     { "LOGIN",    AUTH_STATES,   3, 3, handle_login },
-    { "LOGOUT",   LOGOUT_STATES, 1, 1, handle_logout }
+    { "LOGOUT",   LOGOUT_STATES, 1, 1, handle_logout },
+    { CMD_LIST_PLAYERS,     LOGGED_IN,    1, 1, handle_list_players },
+    { CMD_CHALLENGE,        LOBBY_ONLY,   4, 4, handle_challenge },
+    { CMD_CHALLENGE_REPLY,  LOBBY_ONLY,   3, 3, handle_challenge_reply },
+    { CMD_CHALLENGE_CANCEL, LOBBY_ONLY,   2, 2, handle_challenge_cancel },
+    { CMD_LEAVE_GAME,       IN_GAME_ONLY, 2, 2, handle_leave_game }
 };
 
 void handle_message(Client *c, char *msg)

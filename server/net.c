@@ -4,6 +4,7 @@
  *
  * S0: accept connections, receive framed messages, send replies and close sessions.
  * S1: broadcast OFFLINE when a logged-in client disconnects.
+ * S2: drop pending challenges in session_end().
  */
 #include "net.h"
 #include "protocol.h"
@@ -192,6 +193,10 @@ void session_end(Client *c)
     int elo = c->elo;
 
     snprintf(username, sizeof(username), "%s", c->username);
+
+    /* Pending challenges (outgoing or incoming) die with the session; the other side gets
+     * CHALLENGE_CANCELLED. Done while c->fd is still valid. */
+    challenges_drop_for(c);
 
     /* Notify other logged-in clients before closing this session. */
     if (was_logged_in && username[0] != '\0') {
