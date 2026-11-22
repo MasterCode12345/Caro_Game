@@ -76,6 +76,62 @@ int item_split(char *item, char *parts[], int max)
     return k;
 }
 
+/* ---- error responses -> Vietnamese (protocol.md §4) -------------------------------------------- */
+
+/* Every reason token of protocol.md §4. A page that knows more (e.g. WHO is busy) says it
+ * itself and uses error_text() for everything else. */
+static const struct { const char *token, *text; } reason_texts[] = {
+    { ERR_UNKNOWN_COMMAND,     "Server chưa hỗ trợ chức năng này" },
+    { ERR_BAD_ARGS,            "Yêu cầu sai định dạng" },
+    { ERR_INVALID_USERNAME,    "Tên đăng nhập không hợp lệ (3–20 ký tự: chữ không dấu, số, _)" },
+    { ERR_INVALID_PASSWORD,    "Mật khẩu không hợp lệ (6–32 ký tự ASCII, không dấu cách, không |)" },
+    { ERR_NOT_LOGGED_IN,       "Bạn chưa đăng nhập" },
+    { ERR_INVALID_CREDENTIALS, "Sai tên đăng nhập hoặc mật khẩu" },
+    { ERR_FORBIDDEN_STATE,     "Không thể làm việc này lúc này" },
+    { ERR_NOT_IN_GAME,         "Bạn không ở trong ván này" },
+    { ERR_USER_NOT_FOUND,      "Người chơi này không tồn tại hoặc không còn trực tuyến" },
+    { ERR_CHALLENGE_NOT_FOUND, "Lời mời không còn hiệu lực" },
+    { ERR_MATCH_NOT_FOUND,     "Không tìm thấy ván đấu này" },
+    { ERR_NO_PENDING_OFFER,    "Lời đề nghị không còn hiệu lực" },
+    { ERR_OPPONENT_LEFT,       "Đối thủ đã rời ván" },
+    { ERR_USERNAME_TAKEN,      "Tên đã có người dùng, hãy chọn tên khác" },
+    { ERR_ALREADY_LOGGED_IN,   "Tài khoản đang đăng nhập ở nơi khác" },
+    { ERR_PLAYER_BUSY,         "Người chơi đang bận" },
+    { ERR_CHALLENGE_PENDING,   "Bạn đang có một lời mời chưa được trả lời" },
+    { ERR_OFFER_PENDING,       "Đang có một lời đề nghị chưa được trả lời" },
+    { ERR_NOT_YOUR_TURN,       "Chưa đến lượt bạn" },
+    { ERR_OUT_OF_BOARD,        "Ô này nằm ngoài bàn cờ" },
+    { ERR_CELL_OCCUPIED,       "Ô này đã có quân" },
+    { ERR_GAME_NOT_ACTIVE,     "Ván đã kết thúc" },
+    { ERR_SERVER_ERROR,        "Lỗi phía server, hãy thử lại sau" },
+};
+
+/* Every error status code of protocol.md §4, for a token we do not know (or none). */
+static const struct { int code; const char *text; } code_texts[] = {
+    { ST_BAD_REQUEST,       "Yêu cầu không hợp lệ" },
+    { ST_NOT_AUTHENTICATED, "Chưa đăng nhập hoặc sai thông tin đăng nhập" },
+    { ST_FORBIDDEN,         "Không được phép làm việc này ở trạng thái hiện tại" },
+    { ST_NOT_FOUND,         "Không tìm thấy (người chơi, lời mời hoặc ván đấu không còn)" },
+    { ST_CONFLICT,          "Yêu cầu bị từ chối vì trùng hoặc đang bận" },
+    { ST_NOT_YOUR_TURN,     "Chưa đến lượt bạn" },
+    { ST_OUT_OF_BOARD,      "Ô này nằm ngoài bàn cờ" },
+    { ST_CELL_OCCUPIED,     "Ô này đã có quân" },
+    { ST_GAME_NOT_ACTIVE,   "Ván đã kết thúc" },
+    { ST_SERVER_ERROR,      "Lỗi phía server, hãy thử lại sau" },
+};
+
+char *error_text(int code, char **f, int n)
+{
+    const char *reason = n >= 3 ? f[2] : "";
+    for (size_t i = 0; i < G_N_ELEMENTS(reason_texts); i++)
+        if (strcmp(reason, reason_texts[i].token) == 0)
+            return g_strdup(reason_texts[i].text);
+    for (size_t i = 0; i < G_N_ELEMENTS(code_texts); i++)
+        if (code == code_texts[i].code)
+            return g_strdup(code_texts[i].text);
+    return g_strdup_printf("Lỗi %d: %s", code, *reason != '\0' ? reason : "không rõ lý do");
+}
+
 static gboolean is_status_code(const char *s)
 {
     if (*s == '\0')

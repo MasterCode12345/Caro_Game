@@ -42,6 +42,11 @@ gboolean field_rc(const char *s, int *row, int *col);
  * Returns the number of parts, or max + 1 if there are more than max. */
 int item_split(char *item, char *parts[], int max);
 
+/* An error response (protocol.md §4) as one Vietnamese sentence for the user: by its reason
+ * token f[2] first, then by its status code; anything unknown becomes "Lỗi <code>: <reason>".
+ * code, f, n as given to a ResponseCb. The caller g_free()s the result. */
+char *error_text(int code, char **fields, int n);
+
 void dispatch_cleanup(void);   /* at exit: drop pending requests WITHOUT calling them */
 
 #endif /* CARO_CLIENT_DISPATCH_H */

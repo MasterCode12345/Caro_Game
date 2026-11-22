@@ -173,27 +173,9 @@ static gboolean send_game_cmd(const char *cmd, ResponseCb cb)
 /* Error response of RESIGN / DRAW_* / REMATCH_* / LEAVE_GAME -> "Không <what> được: <why>". */
 static void error_notice(const char *what, int code, char **f, int n)
 {
-    static const struct { const char *token, *text; } table[] = {
-        { ERR_GAME_NOT_ACTIVE,  "ván đã kết thúc" },
-        { ERR_NOT_IN_GAME,      "bạn không ở trong ván này" },
-        { ERR_FORBIDDEN_STATE,  "không thể làm việc này lúc này" },
-        { ERR_OFFER_PENDING,    "đang có một lời đề nghị chưa được trả lời" },
-        { ERR_NO_PENDING_OFFER, "lời đề nghị không còn hiệu lực" },
-        { ERR_OPPONENT_LEFT,    "đối thủ đã rời ván" },
-        { ERR_BAD_ARGS,         "yêu cầu không hợp lệ" },
-        { ERR_SERVER_ERROR,     "lỗi phía server" },
-    };
-    const char *reason = n >= 3 ? f[2] : "";
-    for (size_t i = 0; i < G_N_ELEMENTS(table); i++) {
-        if (strcmp(reason, table[i].token) == 0) {
-            notice(NOTE_ERROR, "Không %s được: %s", what, table[i].text);
-            return;
-        }
-    }
-    if (code == ST_GAME_NOT_ACTIVE)
-        notice(NOTE_ERROR, "Không %s được: ván đã kết thúc", what);
-    else
-        notice(NOTE_ERROR, "Không %s được (%d %s)", what, code, reason);
+    char *why = error_text(code, f, n);
+    notice(NOTE_ERROR, "Không %s được: %s", what, why);
+    g_free(why);
 }
 
 /* ---- dialogs -------------------------------------------------------------------------------------- */
@@ -323,7 +305,9 @@ static void set_player(GtkWidget *label, gboolean to_move, char sym, const char 
         snprintf(elo, sizeof elo, "ELO %d", elo_before);
     }
     char *esc = g_markup_escape_text(name, -1);
-    char *markup = g_strdup_printf("<span size='large'>%s %s  <b>%s</b></span>\n<small>%s</small>",
+    /* insert_hyphens: a name broken across two lines must not show a '-' it does not have */
+    char *markup = g_strdup_printf("<span size='large' insert_hyphens='false'>%s %s  <b>%s</b>"
+                                   "</span>\n<small>%s</small>",
                                    to_move ? "▶" : "   ", symbol_markup(sym), esc, elo);
     gtk_label_set_markup(GTK_LABEL(label), markup);
     g_free(markup);
@@ -430,19 +414,6 @@ static void move_cancels_draw_offers(void)
 
 /* ---- my move ------------------------------------------------------------------------------------------ */
 
-static const char *move_error_text(int code)
-{
-    switch (code) {
-    case ST_NOT_YOUR_TURN:   return "Chưa đến lượt bạn";
-    case ST_OUT_OF_BOARD:    return "Ô này nằm ngoài bàn cờ";
-    case ST_CELL_OCCUPIED:   return "Ô này đã có quân";
-    case ST_GAME_NOT_ACTIVE: return "Ván đã kết thúc";
-    case ST_FORBIDDEN:       return "Bạn không ở trong ván này";
-    case ST_BAD_REQUEST:     return "Nước đi không hợp lệ";
-    default:                 return NULL;
-    }
-}
-
 /* 200|MOVE|move_no — only now is our mark drawn. user_data = the gid the move was sent for. */
 static void on_move_reply(int code, char **f, int n, gpointer data)
 {
@@ -460,11 +431,9 @@ static void on_move_reply(int code, char **f, int n, gpointer data)
         move_cancels_draw_offers();
         clock_restart();                     /* the server reset its move timer: now theirs */
     } else if (!g->ended) {                  /* after GAME_END a refused move needs no message */
-        const char *text = move_error_text(code);
-        if (text != NULL)
-            notice(NOTE_ERROR, "%s", text);
-        else
-            notice(NOTE_ERROR, "Nước đi bị từ chối (%d %s)", code, n >= 3 ? f[2] : "");
+        char *why = error_text(code, f, n);  /* 430 not_your_turn ... 433 game_not_active */
+        notice(NOTE_ERROR, "Nước đi bị từ chối: %s", why);
+        g_free(why);
     }
     update_panel();
 }
@@ -941,8 +910,12 @@ static GtkWidget *side_label(GtkWidget *box, gboolean wrap)
     GtkWidget *l = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
     gtk_label_set_line_wrap(GTK_LABEL(l), wrap);
-    if (wrap)
+    if (wrap) {
+        /* WORD_CHAR: a 20-character name has no space to break at, so it may break inside the
+         * name instead of widening the panel (and shrinking the board). */
+        gtk_label_set_line_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
         gtk_label_set_max_width_chars(GTK_LABEL(l), SIDE_WRAP_CHARS);
+    }
     gtk_box_pack_start(GTK_BOX(box), l, FALSE, FALSE, 0);
     return l;
 }
@@ -979,8 +952,8 @@ GtkWidget *ui_game_new(void)
     gtk_widget_set_size_request(side, SIDE_WIDTH, -1);
     l_title = side_label(side, FALSE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
-    l_me = side_label(side, FALSE);
-    l_opp = side_label(side, FALSE);
+    l_me = side_label(side, TRUE);           /* "▶ X  <name up to 20 chars>" + ELO */
+    l_opp = side_label(side, TRUE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
     l_turn = side_label(side, TRUE);
     l_clock = side_label(side, FALSE);

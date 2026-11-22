@@ -191,3 +191,22 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   your turn and on an occupied cell; a five-in-a-row win shows the winning line on both sides;
   Về sảnh works. Stopping the server during a game sends both clients back to the login page
   (the lost-server check C4 was waiting for).
+- 2026-11-22 · Nghĩa · C6b (client polish, test table, LAN guide): window minimum 760×560 (board
+  still square, 30 px cells next to the side panel); login page focuses Tên đăng nhập, Tab goes
+  top to bottom, Enter in any field logs in; one table in `dispatch.c` (`error_text()`) gives a
+  Vietnamese sentence for every reason token and every error code of protocol.md §4, anything
+  else shows `Lỗi <code>: <reason>`, used by every page; window title shows the logged-in user;
+  closing the window during a running game asks "Thoát bây giờ sẽ bị xử thua", Thoát closes the
+  socket at once and quits; 20-character names wrap (no hyphen) in the lobby bar, the game panel
+  and the replay panel; Đăng xuất locked once sent and while an accepted invitation's GAME_START
+  is on the way; no TODO left in `client/`. Checked with a throwaway GTK harness built with
+  ASan/UBSan that drives the real widgets and saves PNGs: fake mode 15/15 checks and real server
+  (S3, `/tmp/c6b.db`) 17/17 (min size, Tab order, 401 sentence, title, lobby and game with two
+  20-character names, invitation dialog, quit dialog Ở lại / Thoát: server logs the disconnect
+  at once; the opponent's GAME_END DISCONNECT waits for S4). `make` 0 warnings, `make test`
+  passed, `make debug` client started in fake mode with no sanitizer report.
+  `docs/test_report.md`: 21 scenarios with commands and the protocol.md section expected; rows
+  7, 8, 10, 11 (M1–M3) and 19 (bot `--idle`: 0.145 / 0.320 ms without, 0.090 / 0.190 ms with 50
+  silent connections) filled in. README: "Running over a LAN" (IP, ufw, WSL2 mirrored or
+  portproxy, `cli` + PING first, phone hotspot against client isolation) and the Status line.
+  C6 not ticked: the bot against the full server (S4–S7) and the two-machine LAN test wait.

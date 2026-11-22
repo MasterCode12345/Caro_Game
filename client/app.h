@@ -53,6 +53,7 @@ extern AppState app;
 /* main.c */
 void app_show_page(const char *name);
 void app_go_login(const char *error);      /* forget the session, show the login page + error */
+void app_update_title(void);               /* window title: app name + who is logged in */
 
 /* ui_login.c — page "login" */
 GtkWidget *ui_login_new(void);

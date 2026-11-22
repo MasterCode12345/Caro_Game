@@ -16,7 +16,8 @@
  * Page changes all go through app_show_page(): it tells the page that is shown what to load,
  * and tells the history page when it is left, so its replay timer never runs in the background.
  *
- * TODO(C6): minimum window size.
+ * Closing the window during a running game asks first: the server sees the closed socket as a
+ * lost connection and gives the game to the opponent (reason DISCONNECT, protocol.md §8).
  */
 #include <signal.h>
 #include <stdio.h>
@@ -33,8 +34,31 @@
 #define APP_TITLE   "Caro Online – Group 13"
 #define WIN_WIDTH   900
 #define WIN_HEIGHT  700
+/* Smallest window: the game page still has a 450-px board (30 px per cell on 15×15) next to its
+ * 250-px side panel, and the lobby's buttons fit on one row. */
+#define WIN_MIN_WIDTH   760
+#define WIN_MIN_HEIGHT  560
 
 AppState app;   /* the single global state (app.h) */
+
+static GtkWidget *quit_dialog;   /* "Thoát bây giờ sẽ bị xử thua?" while a game runs */
+
+void app_update_title(void)
+{
+    char *title = g_strdup_printf("%s%s%s%s", APP_TITLE, app.username[0] != '\0' ? " · " : "",
+                                  app.username, app.fake_mode ? " [offline]" : "");
+    gtk_window_set_title(app.window, title);
+    g_free(title);
+}
+
+static void close_quit_dialog(void)
+{
+    GtkWidget *d = quit_dialog;
+    if (d != NULL) {
+        quit_dialog = NULL;
+        gtk_widget_destroy(d);
+    }
+}
 
 static gboolean env_is_one(const char *name)
 {
@@ -60,15 +84,57 @@ void app_show_page(const char *name)
 
 void app_go_login(const char *error)
 {
-    ui_lobby_reset();                /* no dialog may outlive the session */
+    close_quit_dialog();             /* no dialog may outlive the session */
+    ui_lobby_reset();
     ui_game_reset();
     ui_history_reset();
     app.state = SESSION_CONNECTED;
     app.username[0] = '\0';
     app.elo = app.wins = app.losses = app.draws = 0;
     memset(&app.game, 0, sizeof app.game);
+    app_update_title();
     ui_login_reset(error);
     app_show_page("login");
+}
+
+/* ---- closing the window -------------------------------------------------------------------------- */
+
+static void on_quit_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)data;
+    if (quit_dialog == GTK_WIDGET(dialog))
+        quit_dialog = NULL;
+    gtk_widget_destroy(GTK_WIDGET(dialog));
+    if (response != GTK_RESPONSE_ACCEPT)
+        return;
+    net_close();                     /* the server sees the FIN at once: DISCONNECT, we lose */
+    gtk_widget_destroy(GTK_WIDGET(app.window));     /* "destroy" -> gtk_main_quit() */
+}
+
+/* "delete-event" = the window's close button (or Cmd+W / Alt+F4). TRUE keeps the window open. */
+static gboolean on_delete_event(GtkWidget *w, GdkEvent *ev, gpointer data)
+{
+    (void)w;
+    (void)ev;
+    (void)data;
+    if (!app.game.active || app.game.ended)
+        return FALSE;                /* nothing to lose: close now */
+    if (quit_dialog != NULL) {
+        gtk_window_present(GTK_WINDOW(quit_dialog));
+        return TRUE;
+    }
+    quit_dialog = gtk_message_dialog_new(app.window, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                         GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE,
+                                         "Thoát bây giờ sẽ bị xử thua");
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(quit_dialog),
+        "Ván #%d với %s đang diễn ra. Nếu thoát, server coi như bạn mất kết nối: bạn bị tính "
+        "thua và bị trừ ELO.", app.game.gid, app.game.opponent);
+    gtk_dialog_add_button(GTK_DIALOG(quit_dialog), "Ở lại", GTK_RESPONSE_REJECT);
+    gtk_dialog_add_button(GTK_DIALOG(quit_dialog), "Thoát", GTK_RESPONSE_ACCEPT);
+    gtk_dialog_set_default_response(GTK_DIALOG(quit_dialog), GTK_RESPONSE_REJECT);
+    g_signal_connect(quit_dialog, "response", G_CALLBACK(on_quit_response), NULL);
+    gtk_widget_show_all(quit_dialog);
+    return TRUE;
 }
 
 /* Offline-mode test keys (Cmd also works on macOS).
@@ -129,8 +195,9 @@ int main(int argc, char *argv[])
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     app.window = GTK_WINDOW(window);
-    gtk_window_set_title(app.window, app.fake_mode ? APP_TITLE " [offline]" : APP_TITLE);
     gtk_window_set_default_size(app.window, WIN_WIDTH, WIN_HEIGHT);
+    gtk_widget_set_size_request(window, WIN_MIN_WIDTH, WIN_MIN_HEIGHT);  /* on a window: its minimum */
+    g_signal_connect(window, "delete-event", G_CALLBACK(on_delete_event), NULL);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
     GtkWidget *stack = gtk_stack_new();
@@ -143,7 +210,7 @@ int main(int argc, char *argv[])
     gtk_container_add(GTK_CONTAINER(window), stack);
 
     gtk_widget_show_all(window);
-    app_show_page("login");
+    app_go_login(NULL);              /* title, empty pages, focus on Tên đăng nhập */
     if (app.fake_mode) {
         g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), NULL);
         g_printerr("caro_client: offline mode (CARO_FAKE=1), no server is used\n");

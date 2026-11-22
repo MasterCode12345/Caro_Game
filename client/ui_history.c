@@ -91,6 +91,14 @@ static void note(GtkWidget *label, NoteKind kind, const char *fmt, ...)
     g_free(text);
 }
 
+/* "<what>: <the Vietnamese sentence for this error response>" under the list. */
+static void error_note(const char *what, int code, char **f, int n)
+{
+    char *why = error_text(code, f, n);
+    note(l_list_note, NOTE_ERROR, "%s: %s", what, why);
+    g_free(why);
+}
+
 static const char *symbol_markup(char s)
 {
     return s == 'X' ? "<span foreground='#b31414'><b>X</b></span>"
@@ -177,7 +185,7 @@ static void on_history_reply(int code, char **f, int n, gpointer data)
     int page, count;
     if (code != ST_OK || n < 4 || !field_int(f[2], &page) || !field_int(f[3], &count)) {
         if (code != ST_OK)
-            note(l_list_note, NOTE_ERROR, "Không tải được lịch sử (%d %s)", code, n >= 3 ? f[2] : "");
+            error_note("Không tải được lịch sử", code, f, n);
         else
             note(l_list_note, NOTE_ERROR, "Server trả về phản hồi HISTORY không hợp lệ");
         update_list_controls();
@@ -373,7 +381,8 @@ static void on_back_to_list(GtkWidget *w, gpointer data)
 static void set_replay_player(GtkWidget *label, char sym, const char *name)
 {
     char *esc = g_markup_escape_text(name, -1);
-    char *markup = g_strdup_printf("<span size='large'>%s  <b>%s</b></span>%s", symbol_markup(sym),
+    char *markup = g_strdup_printf("<span size='large' insert_hyphens='false'>%s  <b>%s</b>"
+                                   "</span>%s", symbol_markup(sym),
                                    esc, strcmp(name, app.username) == 0 ? "  (bạn)" : "");
     gtk_label_set_markup(GTK_LABEL(label), markup);
     g_free(markup);
@@ -450,10 +459,7 @@ static void on_replay_reply(int code, char **f, int n, gpointer data)
     loading = FALSE;
     update_list_controls();
     if (code != ST_OK) {
-        if (n >= 3 && strcmp(f[2], ERR_MATCH_NOT_FOUND) == 0)
-            note(l_list_note, NOTE_ERROR, "Server không còn ván này");
-        else
-            note(l_list_note, NOTE_ERROR, "Không tải được ván (%d %s)", code, n >= 3 ? f[2] : "");
+        error_note("Không tải được ván", code, f, n);    /* 404 match_not_found, ... */
         return;
     }
     int mid, size, count;
@@ -617,8 +623,12 @@ static GtkWidget *side_label(GtkWidget *box, gboolean wrap)
     GtkWidget *l = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
     gtk_label_set_line_wrap(GTK_LABEL(l), wrap);
-    if (wrap)
+    if (wrap) {
+        /* WORD_CHAR: a 20-character name has no space, it may break inside instead of
+         * widening the panel (and shrinking the board). */
+        gtk_label_set_line_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
         gtk_label_set_max_width_chars(GTK_LABEL(l), SIDE_WRAP_CHARS);
+    }
     gtk_box_pack_start(GTK_BOX(box), l, FALSE, FALSE, 0);
     return l;
 }
@@ -646,8 +656,8 @@ static GtkWidget *build_replay_view(void)
     gtk_widget_set_size_request(side, SIDE_WIDTH, -1);
     l_title = side_label(side, FALSE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
-    l_x = side_label(side, FALSE);
-    l_o = side_label(side, FALSE);
+    l_x = side_label(side, TRUE);            /* "X  <name up to 20 chars>  (bạn)" */
+    l_o = side_label(side, TRUE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
     l_result = side_label(side, TRUE);
     gtk_box_pack_start(GTK_BOX(side), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);

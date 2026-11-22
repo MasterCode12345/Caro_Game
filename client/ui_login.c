@@ -62,39 +62,11 @@ static const char *check_password(const char *pw)
 
 /* ---- responses ---------------------------------------------------------------------------------- */
 
-static const char *reason_text(int code, const char *reason)
-{
-    static const struct { const char *token, *text; } table[] = {
-        { ERR_INVALID_CREDENTIALS, "Sai tên đăng nhập hoặc mật khẩu" },
-        { ERR_ALREADY_LOGGED_IN,   "Tài khoản đang đăng nhập ở nơi khác" },
-        { ERR_USERNAME_TAKEN,      "Tên đã tồn tại" },
-        { ERR_INVALID_USERNAME,    "Tên đăng nhập không hợp lệ (3–20 ký tự: chữ không dấu, số, _)" },
-        { ERR_INVALID_PASSWORD,    "Mật khẩu không hợp lệ (6–32 ký tự ASCII, không dấu cách, không |)" },
-        { ERR_BAD_ARGS,            "Yêu cầu sai định dạng" },
-        { ERR_FORBIDDEN_STATE,     "Không thể thực hiện ở trạng thái hiện tại" },
-        { ERR_SERVER_ERROR,        "Lỗi phía server, hãy thử lại sau" },
-    };
-    for (size_t i = 0; i < G_N_ELEMENTS(table); i++)
-        if (strcmp(reason, table[i].token) == 0)
-            return table[i].text;
-    if (code == ST_NOT_AUTHENTICATED)
-        return "Sai tên đăng nhập hoặc mật khẩu";
-    if (code == ST_SERVER_ERROR)
-        return "Lỗi phía server, hãy thử lại sau";
-    return NULL;
-}
-
 static void show_error_response(int code, char **f, int n)
 {
-    const char *reason = n >= 3 ? f[2] : "";
-    const char *text = reason_text(code, reason);
-    if (text != NULL) {
-        show_message(MSG_ERROR, text);
-    } else {
-        char *s = g_strdup_printf("Lỗi %d: %s", code, *reason != '\0' ? reason : "không rõ lý do");
-        show_message(MSG_ERROR, s);
-        g_free(s);
-    }
+    char *text = error_text(code, f, n);      /* dispatch.c: every token and code of §4 */
+    show_message(MSG_ERROR, text);
+    g_free(text);
 }
 
 static void on_register_reply(int code, char **f, int n, gpointer data)
@@ -134,6 +106,7 @@ static void on_login_reply(int code, char **f, int n, gpointer data)
     app.losses = losses;
     app.draws = draws;
     app.state = SESSION_LOBBY;
+    app_update_title();
 
     gtk_entry_set_text(GTK_ENTRY(e_pass), "");
     show_message(MSG_OK, NULL);
@@ -204,6 +177,9 @@ static void on_register_clicked(GtkWidget *w, gpointer data)
 
 /* ---- page --------------------------------------------------------------------------------------- */
 
+/* Focus goes to the first field to fill: Server and Cổng already hold 127.0.0.1 : 5500, so
+ * Tên đăng nhập (or Mật khẩu when the name is still there). Tab then follows the page from top
+ * to bottom: Server, Cổng, Tên đăng nhập, Mật khẩu, Đăng nhập, Đăng ký. */
 void ui_login_reset(const char *error)
 {
     set_busy(FALSE);
@@ -218,7 +194,8 @@ static GtkWidget *grid_row(GtkWidget *grid, int row, const char *label_text, Gtk
     gtk_widget_set_hexpand(entry, TRUE);
     gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), entry, 1, row, 1, 1);
-    g_signal_connect(entry, "activate", G_CALLBACK(on_login_clicked), NULL);  /* Enter = login */
+    /* Enter in any field = Đăng nhập (the password field is where it is usually pressed). */
+    g_signal_connect(entry, "activate", G_CALLBACK(on_login_clicked), NULL);
     return entry;
 }
 

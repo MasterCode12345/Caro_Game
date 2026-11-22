@@ -8,7 +8,12 @@ Turn-based online Caro (Gomoku) for the Network Programming course (IT4062E, SoI
 - **Protocol**: our own, over plain TCP sockets, length-prefixed frames — see
   [`docs/protocol.md`](docs/protocol.md).
 
-Status: in development. Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md).
+Status (22/11/2026): milestones M0–M3 reached. Server stages S0–S3 are done (framing, accounts,
+lobby, challenges, full games with move validation and win/draw); S4–S8 (resign, draw, rematch,
+disconnect, ELO in the database, history, matchmaking, move timer, load tests) are in progress.
+The client has every page (C0–C5) and is being polished (C6). Checkpoint 2 ≈ 01/12/2026.
+Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md), the test table in
+[`docs/test_report.md`](docs/test_report.md).
 
 ## Install
 
@@ -61,14 +66,19 @@ CARO_FAKE=1 CARO_DEBUG=1 ./build/caro_client   # both
 
 - **Login page**: Server (default `127.0.0.1`), Port (default `5500`), username, password.
   The format is checked before anything is sent (docs/protocol.md §2): username 3–20 characters
-  `[A-Za-z0-9_]`, password 6–32 printable ASCII characters, no space, no `|`.
+  `[A-Za-z0-9_]`, password 6–32 printable ASCII characters, no space, no `|`. Enter in any field
+  logs in. Every error code and reason token of docs/protocol.md §4 is shown as a Vietnamese
+  sentence; an unknown one as `Lỗi <code>: <reason>`.
+- **Window**: the title shows who is logged in; the window cannot be made smaller than 760×560.
+  Closing it during a running game asks first ("Thoát bây giờ sẽ bị xử thua"): the server
+  counts the closed connection as a loss by `DISCONNECT`.
 - **`CARO_FAKE=1`** — the window title ends with `[offline]`. Replies arrive after 300 ms through
   the same `dispatch()` path as real messages, so the UI cannot tell the difference. Test inputs:
 
   | Input | Fake reply | Message shown |
   | --- | --- | --- |
   | password `wrong` | `401` `invalid_credentials` | Sai tên đăng nhập hoặc mật khẩu |
-  | register username `taken` | `409` `username_taken` | Tên đã tồn tại |
+  | register username `taken` | `409` `username_taken` | Tên đã có người dùng, hãy chọn tên khác |
   | login username `online` | `409` `already_logged_in` | Tài khoản đang đăng nhập ở nơi khác |
   | anything else | `201` (register) / `200`, ELO 1000 (login) | Đăng ký thành công… / lobby page |
 
@@ -109,6 +119,78 @@ printf '/zero\n' | ./build/cli 127.0.0.1 5500      # expect: -- server closed th
 
 Milestone M0: run `./build/cli 127.0.0.1 5500` in three terminals at once, `PING` in each, then
 `/bytes PING` and `/burst PING ;; PING ;; PING` — every PING gets exactly one `<< 200|PING`.
+
+## Running over a LAN
+
+The server runs on Hân's Linux machine; clients run on other machines in the same network.
+The server listens on `INADDR_ANY` (every interface of the machine), so nothing in the server
+has to change: the clients only need its LAN IP address and an open port 5500.
+
+1. **Start the server** on the server machine:
+
+   ```bash
+   ./build/caro_server 5500
+   ```
+
+2. **Find the server's IP address** (the `inet` address of the Wi-Fi or Ethernet interface,
+   e.g. `192.168.1.23`; not `127.0.0.1`):
+
+   ```bash
+   ip -4 addr                # Ubuntu
+   ipconfig getifaddr en0    # macOS (en0 = Wi-Fi on most Macs)
+   ```
+
+3. **Open port 5500** if the firewall is on. On Ubuntu, `sudo ufw status` shows it; when it says
+   `active`:
+
+   ```bash
+   sudo ufw allow 5500/tcp
+   ```
+
+4. **Server inside WSL2** (Windows): the other machines must reach WSL through Windows. Use one
+   of these, then give the clients the **Windows** machine's IP (`ipconfig` in Windows, "IPv4
+   Address" of the Wi-Fi adapter).
+   - **Mirrored networking** (Windows 11 22H2 or later): put this in `%UserProfile%\.wslconfig`,
+     then run `wsl --shutdown` in PowerShell and open WSL again. WSL then uses the Windows
+     network interfaces directly.
+
+     ```ini
+     [wsl2]
+     networkingMode=mirrored
+     ```
+
+     If connections are still refused, allow the port in the Hyper-V firewall too (PowerShell
+     as administrator):
+
+     ```powershell
+     New-NetFirewallHyperVRule -Name Caro5500 -DisplayName "Caro 5500" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 5500
+     ```
+
+   - **Port forwarding** (default NAT networking): in WSL, `hostname -I` gives WSL's own address
+     (e.g. `172.20.5.9`). In PowerShell as administrator, forward the port and open it in
+     Windows Firewall. WSL's address changes after a restart: run `netsh` again then.
+
+     ```powershell
+     netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=5500 connectaddress=172.20.5.9 connectport=5500
+     New-NetFirewallRule -DisplayName "Caro 5500" -Direction Inbound -Protocol TCP -LocalPort 5500 -Action Allow
+     ```
+
+5. **Check the network before opening the GUI**, from each client machine (replace the IP):
+
+   ```bash
+   ./build/cli 192.168.1.23 5500
+   ```
+
+   Type `PING`: the answer must be `<< 200|PING`. If `cli` cannot connect, the problem is the
+   network or a firewall, not the game.
+
+6. **Start the GUI** on each client machine and type the server's IP in the Server field
+   (port `5500`).
+
+**Campus Wi-Fi** often blocks traffic between devices of the same network ("client isolation"):
+`cli` then hangs on connecting and fails after a minute or more, although both machines are
+online. Use a phone hotspot instead: connect
+the server and every client to it, find the server's IP again (step 2), and repeat step 5.
 
 ## Team
 
