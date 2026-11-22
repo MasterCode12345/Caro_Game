@@ -210,3 +210,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   silent connections) filled in. README: "Running over a LAN" (IP, ufw, WSL2 mirrored or
   portproxy, `cli` + PING first, phone hotspot against client isolation) and the Status line.
   C6 not ticked: the bot against the full server (S4–S7) and the two-machine LAN test wait.
+  regression 36/36, `make test` passed, zero warnings.
+- 2026-11-22 · Hân · Quick fix after S3: `TCP_NODELAY` on accepted sockets (Nagle + delayed ACK
+  held responses ~40 ms), `listen()` backlog 16 → `SOMAXCONN`. Bot N=20, 30 s, before → after:
+  mean 1.523 → 1.254 ms, P95 4.820 → 2.974 ms, max 95.194 → 49.061 ms, ~5 760 → ~6 930
+  moves/s (one run each, so max is noisy). `make` zero warnings, `make test` passed.
+  Issue #001 added to `docs/issues.md`.

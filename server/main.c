@@ -123,7 +123,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    if (listen(listenfd, 16) < 0) {
+    if (listen(listenfd, SOMAXCONN) < 0) {
         perror("listen");
         close(listenfd);
         db_close();

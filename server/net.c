@@ -24,6 +24,9 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
+
+int one = 1;
 
 /* Accept a new client and assign a free slot. */
 int accept_client(int listenfd)
@@ -40,7 +43,8 @@ int accept_client(int listenfd)
         log_event("accept error: %s", strerror(errno));
         return -1;
     }
-
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one) < 0)
+    log_event("TCP_NODELAY failed: %s", strerror(errno));
     int slot = -1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd == -1) {
