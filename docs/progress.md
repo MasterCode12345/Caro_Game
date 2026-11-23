@@ -34,7 +34,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **M1** (20/11) register/login from GTK; 401, 409 shown
 - [x] **M2** (22/11) two machines see each other, challenge → GAME_START
 - [x] **M3** (24/11) full game between two machines; bad moves rejected
-- [ ] **M4** (26/11) every ending correct, ELO persists after restart
+- [x] **M4** (26/11) every ending correct, ELO persists after restart
 - [ ] **M5** (28/11) all graded features work
 - [ ] **Code freeze** (29/11) after the full test table passes
 
@@ -231,3 +231,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   one line each. Checked with 27 scripted checks (1000 vs 1000 → +16 / −16, RESIGN, DRAW,
   DISCONNECT, rows in matches / moves / users, restart keeps the ELO) on an ASan/UBSan build,
   S4 regression passed, `make` zero warnings, `make test` passed.
+- 2026-11-23 · Nghĩa + Hân · M4 reached with Hân's real server (S4, S5), two GTK client windows:
+  resign; draw offer declined, then accepted; rematch with X and O swapped; closing the window
+  during a game -> the opponent wins by DISCONNECT; server stopped and restarted on the same DB
+  keeps the ELO. Still missing: `STATS` on the server (Hân does it first in S6), so after a game
+  the lobby shows "Không lấy được ELO và thành tích từ server: Server chưa hỗ trợ chức năng này".
