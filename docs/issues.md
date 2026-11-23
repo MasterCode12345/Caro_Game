@@ -25,6 +25,24 @@ Copy this block to the top of the list below and fill it in.
 
 ## Issues
 
+### #002 — Malformed frame: reason not logged
+
+- **Date:** 2026-11-23
+- **Found by:** Nghĩa (test report row 3)
+- **Severity:** minor
+- **Steps to reproduce:**
+  1. Start the server: `./build/caro_server 5500`.
+  2. Run `./build/cli 127.0.0.1 5500` and type `/zero` (or `/huge` in a new cli).
+  3. Look at the server log.
+- **Expected:** the server closes that connection and writes a log line that gives the reason
+  (docs/protocol.md §1: "A frame with LENGTH 0 or larger than 16384 is malformed: the server
+  logs it and closes that connection").
+- **Actual:** the connection is closed correctly, but the log only has
+  `EVENT | disconnected: <addr>`.
+- **Suggested fix:** in `server/main.c`, in the `frame_result < 0` branch, call
+  `log_event("malformed frame from %s", c->addr)` before `session_end(c)`.
+- **Status:** OPEN (Hân, in S8)
+
 ### #001 — session_end() recursion when clients disconnect together
 
 - **Date:** 2026-11-22
