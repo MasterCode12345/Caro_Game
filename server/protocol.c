@@ -72,7 +72,6 @@ static const Command commands[] = {
     { CMD_DRAW_REPLY,       IN_GAME_ONLY, 3, 3, handle_draw_reply },
     { CMD_REMATCH,          IN_GAME_ONLY, 2, 2, handle_rematch },
     { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply },
-    { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply },
     { CMD_STATS,            LOBBY_OR_QUEUE, 1, 2, handle_stats },
     { CMD_HISTORY,          LOBBY_OR_QUEUE, 1, 2, handle_history },
     { CMD_REPLAY,           LOBBY_OR_QUEUE, 2, 2, handle_replay },

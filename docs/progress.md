@@ -235,7 +235,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   read with `db_user_get()` (same function as LOGIN), 404 `user_not_found`. Checked with
   `test_stats.py` and a 10-bot 20 s run on an ASan/UBSan build, `make` zero warnings,
   `make test` passed.
-- 2026-11-22 · Hân · S6: `HISTORY` / `HISTORY|page` (10 per page, newest first, outcome from the caller's
+- 2026-11-23 · Hân · S6: `HISTORY` / `HISTORY|page` (10 per page, newest first, outcome from the caller's
   side, `ended_at` as `YYYY-MM-DD HH:MM`), `REPLAY|mid` (404 `match_not_found`, moves in play order),
   `LEADERBOARD` / `LEADERBOARD|n` (default 10, max 20, elo desc then username); new `history.c`, queries in
   `db.c`; STATS was added in S4. Checked with 48 scripted checks (12-game history with paging, a 225-move
