@@ -177,14 +177,6 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   set to -1 before anything is sent to other clients. Checked with 57 scripted checks (incl. a
   225-move draw and a disconnect in a running game) on an ASan/UBSan build, S2 regression 36/36,
   `make test` passed, zero warnings.
-- 2026-11-22 · Hân · S3: real `struct Game` table (`match.h`), `game_start()` creates the Game
-  (board, turn X, deadline), `MOVE` with the checks in the exact order of §6.3 (400, 403, 433,
-  430, 431, 432; board unchanged on error), response → `OPP_MOVE` → `GAME_END`, `game_end()`
-  (FIVE with 5 cells, BOARD_FULL, delta "0" until S5), `LEAVE_GAME` checks the gid and ends a
-  running game by RESIGN, `game_detach()` from `session_end()`. Fixed an S1 bug in
-  `session_end()`: two clients closing together recursed hundreds of times (fd is now set to -1
-  first). Checked with 57 scripted checks (incl. a 225-move draw) on an ASan/UBSan build, S2
-  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Nghĩa + Hân · M2 and M3 reached with Hân's real server (S2, S3), two GTK client
   windows: both players see each other in the lobby; challenge, decline, cancel and the 30 s
   expiry; accept -> GAME_START with the challenger as X; the client blocks clicks when it is not
@@ -210,7 +202,6 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   silent connections) filled in. README: "Running over a LAN" (IP, ufw, WSL2 mirrored or
   portproxy, `cli` + PING first, phone hotspot against client isolation) and the Status line.
   C6 not ticked: the bot against the full server (S4–S7) and the two-machine LAN test wait.
-  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Hân · Quick fix after S3: `TCP_NODELAY` on accepted sockets (Nagle + delayed ACK
   held responses ~40 ms), `listen()` backlog 16 → `SOMAXCONN`. Bot N=20, 30 s, before → after:
   mean 1.523 → 1.254 ms, P95 4.820 → 2.974 ms, max 95.194 → 49.061 ms, ~5 760 → ~6 930
