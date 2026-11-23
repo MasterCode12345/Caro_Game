@@ -365,3 +365,194 @@ fail:
     db_exec("ROLLBACK;");
     return -1;
 }
+
+
+/* ---------------------------------------------------------------------------------------
+ * S6: HISTORY, REPLAY, LEADERBOARD (read only)
+ * ------------------------------------------------------------------------------------- */
+
+/* Copy a column text into a fixed buffer (NULL -> empty string, too long -> cut). */
+static void copy_column(char *dst, size_t cap, sqlite3_stmt *stmt, int col)
+{
+    const unsigned char *text = sqlite3_column_text(stmt, col);
+
+    snprintf(dst, cap, "%s", text ? (const char *)text : "");
+}
+
+int db_history(int user_id, int page, HistoryRow *out, int max_rows)
+{
+    if (db == NULL || out == NULL || page < 1 || max_rows < 1)
+        return -1;
+
+    /* ids grow with every saved match, so id DESC is "newest first". */
+    const char *sql =
+        "SELECT m.id, m.x_user, ux.username, uo.username, m.result, m.reason,"
+        " substr(m.ended_at, 1, 16)"
+        " FROM matches m"
+        " JOIN users ux ON ux.id = m.x_user"
+        " JOIN users uo ON uo.id = m.o_user"
+        " WHERE m.x_user = ?1 OR m.o_user = ?1"
+        " ORDER BY m.id DESC LIMIT ?2 OFFSET ?3;";
+
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[DB] Prepare history failed: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, max_rows);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)(page - 1) * max_rows);
+
+    int n = 0;
+    int rc = SQLITE_DONE;
+
+    while (n < max_rows && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        HistoryRow *row = &out[n];
+        int i_am_x = (sqlite3_column_int(stmt, 1) == user_id);
+        char result[8];
+
+        row->match_id = sqlite3_column_int(stmt, 0);
+        copy_column(row->opponent, sizeof(row->opponent), stmt, i_am_x ? 3 : 2);
+        snprintf(row->my_symbol, sizeof(row->my_symbol), "%s", i_am_x ? SYM_X : SYM_O);
+        copy_column(result, sizeof(result), stmt, 4);
+        copy_column(row->reason, sizeof(row->reason), stmt, 5);
+        copy_column(row->ended_at, sizeof(row->ended_at), stmt, 6);
+
+        /* X_WIN is a win for X and a loss for O; O_WIN the other way round. */
+        if (strcmp(result, RES_DRAW) == 0)
+            snprintf(row->outcome, sizeof(row->outcome), "%s", OUT_DRAW);
+        else
+            snprintf(row->outcome, sizeof(row->outcome), "%s",
+                     ((strcmp(result, RES_X_WIN) == 0) == i_am_x) ? OUT_WIN : OUT_LOSS);
+
+        n++;
+    }
+
+    if (n < max_rows && rc != SQLITE_DONE) {
+        fprintf(stderr, "[DB] Query history failed: %s\n", sqlite3_errmsg(db));
+        n = -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int db_replay_header(int match_id, ReplayHeader *out)
+{
+    if (db == NULL || out == NULL)
+        return -1;
+
+    const char *sql =
+        "SELECT m.id, m.board_size, ux.username, uo.username, m.result, m.reason"
+        " FROM matches m"
+        " JOIN users ux ON ux.id = m.x_user"
+        " JOIN users uo ON uo.id = m.o_user"
+        " WHERE m.id = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[DB] Prepare replay header failed: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, match_id);
+
+    int rc = sqlite3_step(stmt);
+    int found = -1;
+
+    if (rc == SQLITE_ROW) {
+        out->match_id = sqlite3_column_int(stmt, 0);
+        out->board_size = sqlite3_column_int(stmt, 1);
+        copy_column(out->x_user, sizeof(out->x_user), stmt, 2);
+        copy_column(out->o_user, sizeof(out->o_user), stmt, 3);
+        copy_column(out->result, sizeof(out->result), stmt, 4);
+        copy_column(out->reason, sizeof(out->reason), stmt, 5);
+        found = 1;
+    } else if (rc == SQLITE_DONE) {
+        found = 0;
+    } else {
+        fprintf(stderr, "[DB] Query replay header failed: %s\n", sqlite3_errmsg(db));
+    }
+
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+int db_replay_moves(int match_id, int moves[][2], int max_moves)
+{
+    if (db == NULL || moves == NULL || max_moves < 1)
+        return -1;
+
+    const char *sql = "SELECT row, col FROM moves WHERE match_id = ? ORDER BY move_no;";
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[DB] Prepare replay moves failed: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, match_id);
+
+    int n = 0;
+    int rc;
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (n >= max_moves) {           /* more moves than any board can hold: bad data */
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+        moves[n][0] = sqlite3_column_int(stmt, 0);
+        moves[n][1] = sqlite3_column_int(stmt, 1);
+        n++;
+    }
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "[DB] Query replay moves failed: %s\n", sqlite3_errmsg(db));
+        n = -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int db_leaderboard(int n, RankRow *out)
+{
+    if (db == NULL || out == NULL || n < 1)
+        return -1;
+
+    const char *sql =
+        "SELECT username, elo, wins, losses, draws FROM users"
+        " ORDER BY elo DESC, username ASC LIMIT ?;";
+
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[DB] Prepare leaderboard failed: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, n);
+
+    int k = 0;
+    int rc = SQLITE_DONE;
+
+    while (k < n && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        copy_column(out[k].username, sizeof(out[k].username), stmt, 0);
+        out[k].elo = sqlite3_column_int(stmt, 1);
+        out[k].wins = sqlite3_column_int(stmt, 2);
+        out[k].losses = sqlite3_column_int(stmt, 3);
+        out[k].draws = sqlite3_column_int(stmt, 4);
+        k++;
+    }
+
+    if (k < n && rc != SQLITE_DONE) {
+        fprintf(stderr, "[DB] Query leaderboard failed: %s\n", sqlite3_errmsg(db));
+        k = -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return k;
+}

@@ -216,7 +216,9 @@ void session_end(Client *c)
     /* S3: take c out of its game so no Game keeps a pointer to this slot (S4 adds the
      * DISCONNECT result). */
     game_detach(c);
-
+    
+    /* game_detach() may have ended a running game and changed c's ELO: use the new value. */
+    elo = c->elo;
     /* Notify other logged-in clients (broadcast_status skips fd < 0, so never c itself). */
     if (was_logged_in && username[0] != '\0') {
         broadcast_status(c, username, PS_OFFLINE, elo);

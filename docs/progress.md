@@ -24,7 +24,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **S3** (23–24/11) game, MOVE validation, win/draw, GAME_END
 - [x] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
 - [x] **S5** (25–26/11) DB + ELO
-- [ ] **S6** (27–28/11) history/replay/leaderboard
+- [x] **S6** (27–28/11) history/replay/leaderboard
 - [ ] **S7** (27–28/11) matchmaking, timers
 - [ ] **S8** (29/11) valgrind, malformed input, load
 
@@ -34,7 +34,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **M1** (20/11) register/login from GTK; 401, 409 shown
 - [x] **M2** (22/11) two machines see each other, challenge → GAME_START
 - [x] **M3** (24/11) full game between two machines; bad moves rejected
-- [x] **M4** (26/11) every ending correct, ELO persists after restart
+- [ ] **M4** (26/11) every ending correct, ELO persists after restart
 - [ ] **M5** (28/11) all graded features work
 - [ ] **Code freeze** (29/11) after the full test table passes
 
@@ -177,6 +177,14 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   set to -1 before anything is sent to other clients. Checked with 57 scripted checks (incl. a
   225-move draw and a disconnect in a running game) on an ASan/UBSan build, S2 regression 36/36,
   `make test` passed, zero warnings.
+- 2026-11-22 · Hân · S3: real `struct Game` table (`match.h`), `game_start()` creates the Game
+  (board, turn X, deadline), `MOVE` with the checks in the exact order of §6.3 (400, 403, 433,
+  430, 431, 432; board unchanged on error), response → `OPP_MOVE` → `GAME_END`, `game_end()`
+  (FIVE with 5 cells, BOARD_FULL, delta "0" until S5), `LEAVE_GAME` checks the gid and ends a
+  running game by RESIGN, `game_detach()` from `session_end()`. Fixed an S1 bug in
+  `session_end()`: two clients closing together recursed hundreds of times (fd is now set to -1
+  first). Checked with 57 scripted checks (incl. a 225-move draw) on an ASan/UBSan build, S2
+  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Nghĩa + Hân · M2 and M3 reached with Hân's real server (S2, S3), two GTK client
   windows: both players see each other in the lobby; challenge, decline, cancel and the 30 s
   expiry; accept -> GAME_START with the challenger as X; the client blocks clicks when it is not
@@ -202,6 +210,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   silent connections) filled in. README: "Running over a LAN" (IP, ufw, WSL2 mirrored or
   portproxy, `cli` + PING first, phone hotspot against client isolation) and the Status line.
   C6 not ticked: the bot against the full server (S4–S7) and the two-machine LAN test wait.
+  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Hân · Quick fix after S3: `TCP_NODELAY` on accepted sockets (Nagle + delayed ACK
   held responses ~40 ms), `listen()` backlog 16 → `SOMAXCONN`. Bot N=20, 30 s, before → after:
   mean 1.523 → 1.254 ms, P95 4.820 → 2.974 ms, max 95.194 → 49.061 ms, ~5 760 → ~6 930
@@ -222,8 +231,13 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   one line each. Checked with 27 scripted checks (1000 vs 1000 → +16 / −16, RESIGN, DRAW,
   DISCONNECT, rows in matches / moves / users, restart keeps the ELO) on an ASan/UBSan build,
   S4 regression passed, `make` zero warnings, `make test` passed.
-- 2026-11-23 · Nghĩa + Hân · M4 reached with Hân's real server (S4, S5), two GTK client windows:
-  resign; draw offer declined, then accepted; rematch with X and O swapped; closing the window
-  during a game -> the opponent wins by DISCONNECT; server stopped and restarted on the same DB
-  keeps the ELO. Still missing: `STATS` on the server (Hân does it first in S6), so after a game
-  the lobby shows "Không lấy được ELO và thành tích từ server: Server chưa hỗ trợ chức năng này".
+- 2026-11-23 · Hân · S4 (STATS): `STATS` / `STATS|user` (L, Q) → `200|STATS|user|elo|wins|losses|draws`,
+  read with `db_user_get()` (same function as LOGIN), 404 `user_not_found`. Checked with
+  `test_stats.py` and a 10-bot 20 s run on an ASan/UBSan build, `make` zero warnings,
+  `make test` passed.
+- 2026-11-22 · Hân · S6: `HISTORY` / `HISTORY|page` (10 per page, newest first, outcome from the caller's
+  side, `ended_at` as `YYYY-MM-DD HH:MM`), `REPLAY|mid` (404 `match_not_found`, moves in play order),
+  `LEADERBOARD` / `LEADERBOARD|n` (default 10, max 20, elo desc then username); new `history.c`, queries in
+  `db.c`; STATS was added in S4. Checked with 48 scripted checks (12-game history with paging, a 225-move
+  replay of 1102 bytes, ranking order, every error code) on an ASan/UBSan build, S4/S5/STATS regression
+  passed, `make` zero warnings, `make test` passed.

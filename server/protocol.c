@@ -11,7 +11,7 @@
 #include "net.h"
 #include "lobby.h"
 #include "match.h"
-
+#include "history.h"
 #include <string.h>
 
 /* State permission masks. */
@@ -26,6 +26,8 @@
                       STATE_BIT(SESSION_IN_QUEUE))
 
 #define LOBBY_ONLY    (STATE_BIT(SESSION_LOBBY))
+#define LOBBY_OR_QUEUE (STATE_BIT(SESSION_LOBBY) | \
+                       STATE_BIT(SESSION_IN_QUEUE))
 #define IN_GAME_ONLY  (STATE_BIT(SESSION_IN_GAME))
 #define LOGGED_IN     (STATE_BIT(SESSION_LOBBY) | \
                       STATE_BIT(SESSION_IN_QUEUE) | \
@@ -66,7 +68,12 @@ static const Command commands[] = {
     { CMD_DRAW_OFFER,       IN_GAME_ONLY, 2, 2, handle_draw_offer },
     { CMD_DRAW_REPLY,       IN_GAME_ONLY, 3, 3, handle_draw_reply },
     { CMD_REMATCH,          IN_GAME_ONLY, 2, 2, handle_rematch },
-    { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply }
+    { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply },
+    { CMD_REMATCH_REPLY,    IN_GAME_ONLY, 3, 3, handle_rematch_reply },
+    { CMD_STATS,            LOBBY_OR_QUEUE, 1, 2, handle_stats },
+    { CMD_HISTORY,          LOBBY_OR_QUEUE, 1, 2, handle_history },
+    { CMD_REPLAY,           LOBBY_OR_QUEUE, 2, 2, handle_replay },
+    { CMD_LEADERBOARD,      LOBBY_OR_QUEUE, 1, 2, handle_leaderboard }
 };
 
 void handle_message(Client *c, char *msg)
