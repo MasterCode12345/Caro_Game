@@ -64,4 +64,7 @@ void handle_draw_offer(Client *c, char *fields[], int nfields);
 void handle_draw_reply(Client *c, char *fields[], int nfields);
 void handle_rematch(Client *c, char *fields[], int nfields);
 void handle_rematch_reply(Client *c, char *fields[], int nfields);
+/* S7: the move timer. Called from tick() once per select() round: every running game whose
+ * deadline has passed ends with reason TIMEOUT, and the player who was NOT to move wins. */
+void match_tick(time_t now);
 #endif /* CARO_SERVER_MATCH_H */

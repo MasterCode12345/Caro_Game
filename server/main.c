@@ -16,7 +16,7 @@
 #include "log.h"
 #include "db.h"
 #include "lobby.h"
-
+#include "match.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,11 +34,14 @@
 
 Client clients[MAX_CLIENTS];
 
-/* Timer tasks, run after every select() round (select has a 1 s timeout, so at most ~1 s
- * late). S2: challenge expiry. S7 will add matchmaking and the move timer. */
+/* Timer tasks, run after every select() round. select() has a 1 second timeout, so this runs
+ * at least once a second even when no client sends anything: that is the only clock the server
+ * has (no thread, no alarm()). S2: challenge expiry. S7: matchmaking pass (lobby_tick) and
+ * the move timer (match_tick). Everything is late by at most about one second. */
 static void tick(time_t now)
 {
     lobby_tick(now);
+    match_tick(now);
 }
 
 static int parse_port(const char *arg, int *port)

@@ -306,7 +306,31 @@ void game_detach(Client *c)
     if (!was_running && opp != NULL && opp->fd >= 0)
         send_event(opp, EV_OPP_LEFT "|%d", id);
 }
+/* S7: the move timer. Every move sets g->deadline = now + sec (handle_move, game_start), so
+ * a running game whose deadline has passed means the player to move did not answer in time.
+ *
+ * No thread, no alarm(), no timer file descriptor: main() calls select() with a 1 second
+ * timeout, so the loop wakes up at least once a second even when nobody sends anything, and
+ * tick() calls this function on every wake-up. A deadline is therefore noticed at most about
+ * one second late (plus the one-second resolution of time_t), which is fine for a 15-60 s
+ * move limit. The countdown shown by the client is display only; this is the real decision.
+ *
+ * game_end() sends events, and a failed send can end a session, which detaches that player
+ * and may free this slot. The slot is re-read on every loop iteration, never cached. */
+void match_tick(time_t now)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        Game *g = &games[i];
 
+        if (g->id == 0 || g->ended || now <= g->deadline)
+            continue;
+
+        /* The player whose turn it is ran out of time: the other one wins. */
+        char winner = (g->turn == CELL_X) ? CELL_O : CELL_X;
+
+        game_end(g, winner, END_TIMEOUT, NULL);
+    }
+}
 /* ---------------------------------------------------------------------------------------
  * MOVE|gid|row|col (IN_GAME)
  * ------------------------------------------------------------------------------------- */

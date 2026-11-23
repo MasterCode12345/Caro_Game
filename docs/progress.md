@@ -25,7 +25,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **S4** (25–26/11) resign/draw/rematch/leave/disconnect
 - [x] **S5** (25–26/11) DB + ELO
 - [x] **S6** (27–28/11) history/replay/leaderboard
-- [ ] **S7** (27–28/11) matchmaking, timers
+- [x] **S7** (27–28/11) matchmaking, timers
 - [ ] **S8** (29/11) valgrind, malformed input, load
 
 ## Integration milestones — both, evening
@@ -241,3 +241,12 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   `db.c`; STATS was added in S4. Checked with 48 scripted checks (12-game history with paging, a 225-move
   replay of 1102 bytes, ranking order, every error code) on an ASan/UBSan build, S4/S5/STATS regression
   passed, `make` zero warnings, `make test` passed.
+- 2026-11-23 · Hân · S7: `FIND_MATCH` / `CANCEL_MATCH`; the queue is the set of IN_QUEUE clients
+  ordered by `queued_at` (no separate list, so LOGOUT, disconnect and CANCEL leave it by changing
+  the state); matchmaking pass once per second from `lobby_tick()`: longest waiter first, partner
+  with the closest ELO inside `min(400, 100 + 50 * floor(waited / 10))`, the longer waiter plays X,
+  size 15, 30 s per move; move timer `match_tick()` from `tick()`: `deadline` passed → the player
+  to move loses, reason TIMEOUT. Both use the 1 s `select()` timeout, no thread or alarm. Checked
+  with 29 scripted checks plus the slow ones (gap 150 pairs at 10.0 s, gap 450 never pairs, gap
+  400 pairs at 60.1 s, TIMEOUT after 16 s, a move restarts the clock) on an ASan/UBSan build, no
+  sanitizer output; S2 regression passed; `make test` passed, zero warnings.

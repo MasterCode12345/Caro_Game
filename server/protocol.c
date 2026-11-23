@@ -28,6 +28,7 @@
 #define LOBBY_ONLY    (STATE_BIT(SESSION_LOBBY))
 #define LOBBY_OR_QUEUE (STATE_BIT(SESSION_LOBBY) | \
                        STATE_BIT(SESSION_IN_QUEUE))
+#define QUEUE_ONLY    (STATE_BIT(SESSION_IN_QUEUE))
 #define IN_GAME_ONLY  (STATE_BIT(SESSION_IN_GAME))
 #define LOGGED_IN     (STATE_BIT(SESSION_LOBBY) | \
                       STATE_BIT(SESSION_IN_QUEUE) | \
@@ -62,6 +63,8 @@ static const Command commands[] = {
     { CMD_CHALLENGE,        LOBBY_ONLY,   4, 4, handle_challenge },
     { CMD_CHALLENGE_REPLY,  LOBBY_ONLY,   3, 3, handle_challenge_reply },
     { CMD_CHALLENGE_CANCEL, LOBBY_ONLY,   2, 2, handle_challenge_cancel },
+    { CMD_FIND_MATCH,       LOBBY_ONLY,   1, 1, handle_find_match },
+    { CMD_CANCEL_MATCH,     QUEUE_ONLY,   1, 1, handle_cancel_match },
     { CMD_MOVE,             IN_GAME_ONLY, 4, 4, handle_move },
     { CMD_LEAVE_GAME,       IN_GAME_ONLY, 2, 2, handle_leave_game },
     { CMD_RESIGN,           IN_GAME_ONLY, 2, 2, handle_resign },

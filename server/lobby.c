@@ -371,10 +371,141 @@ void challenges_drop_for(Client *c)
     }
 }
 
+/* ---------------------------------------------------------------------------------------
+ * S7: matchmaking (FIND_MATCH, CANCEL_MATCH, the pairing pass)
+ *
+ * There is no separate queue structure: the queue IS the set of clients whose state is
+ * SESSION_IN_QUEUE, ordered by queued_at. So every way of leaving the queue (CANCEL_MATCH,
+ * LOGOUT, a dropped connection, being paired) simply changes c->state, and a client that is
+ * gone can never be left behind in a list as a dangling entry.
+ * ------------------------------------------------------------------------------------- */
+
+static int in_queue(const Client *c)
+{
+    return c->fd >= 0 && c->state == SESSION_IN_QUEUE;
+}
+
+/* FIND_MATCH (L) -> 200|FIND_MATCH, state Q. The pairing itself happens in the next tick. */
+void handle_find_match(Client *c, char *fields[], int nfields)
+{
+    (void)fields;
+    (void)nfields;
+
+    /* Update first, send afterwards (a failed send ends c's session and resets the slot). */
+    c->state = SESSION_IN_QUEUE;
+    c->queued_at = time(NULL);
+
+    if (reply(c, ST_OK, CMD_FIND_MATCH, NULL) < 0)
+        return;
+
+    /* A queued player cannot answer invitations: drop his pending ones (protocol.md 6.2). */
+    challenges_drop_for(c);
+
+    if (c->fd >= 0)
+        broadcast_status(c, c->username, PS_IN_QUEUE, c->elo);
+}
+
+/* CANCEL_MATCH (Q) -> 200|CANCEL_MATCH, state L. */
+void handle_cancel_match(Client *c, char *fields[], int nfields)
+{
+    (void)fields;
+    (void)nfields;
+
+    c->state = SESSION_LOBBY;
+    c->queued_at = 0;
+
+    if (reply(c, ST_OK, CMD_CANCEL_MATCH, NULL) < 0)
+        return;
+
+    broadcast_status(c, c->username, PS_IDLE, c->elo);
+}
+
+/* Largest ELO gap accepted for a player who has waited `waited` seconds:
+ * 100 + 50 per full 10 s, never more than 400. */
+static long mm_allowed_gap(long waited)
+{
+    if (waited < 0)                         /* the clock was set back: treat as just queued */
+        waited = 0;
+
+    long gap = MM_BASE_GAP + (long)MM_STEP_GAP * (waited / MM_STEP_SEC);
+
+    return gap > MM_MAX_GAP ? MM_MAX_GAP : gap;
+}
+
+/* Longest waiting first; equal queued_at (same second) -> lower slot first, so the order is
+ * always the same and never depends on qsort. */
+static int cmp_by_wait(const void *a, const void *b)
+{
+    const Client *x = *(Client * const *)a;
+    const Client *y = *(Client * const *)b;
+
+    if (x->queued_at != y->queued_at)
+        return (x->queued_at < y->queued_at) ? -1 : 1;
+
+    return (x < y) ? -1 : (x > y);
+}
+
+/* One pairing pass. Walk the queue from the longest waiting player; he takes the partner with
+ * the closest ELO among the players behind him whose gap he accepts. The gap that counts is the
+ * one of the player who waited LONGER (protocol.md 6.2), which is always the one we are
+ * looking at. He plays X.
+ *
+ * game_start() sends events, and a failed send can end somebody's session, so the state of
+ * every candidate is re-checked each time instead of trusting what was read before. */
+static void matchmaking_pass(time_t now)
+{
+    Client *queue[MAX_CLIENTS];
+    int n = 0;
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (in_queue(&clients[i]))
+            queue[n++] = &clients[i];
+    }
+
+    if (n < 2)
+        return;
+
+    qsort(queue, (size_t)n, sizeof(queue[0]), cmp_by_wait);
+
+    for (int i = 0; i < n; i++) {
+        Client *a = queue[i];
+
+        if (!in_queue(a))                   /* paired already, or gone */
+            continue;
+
+        long gap = mm_allowed_gap((long)(now - a->queued_at));
+        Client *best = NULL;
+        int best_diff = 0;
+
+        for (int j = i + 1; j < n; j++) {
+            Client *b = queue[j];
+
+            if (!in_queue(b))
+                continue;
+
+            int diff = abs(a->elo - b->elo);
+
+            if (diff > gap)
+                continue;
+
+            if (best == NULL || diff < best_diff) {     /* tie: the one who waited longer */
+                best = b;
+                best_diff = diff;
+            }
+        }
+
+        if (best != NULL)
+            game_start(a, best, BOARD_SIZE, MATCH_SEC_PER_MOVE);
+    }
+}
+
 /* Called from tick() once per select() round (at most 1 s apart, thanks to the select timeout:
- * no thread or alarm needed). */
+ * no thread or alarm needed). Challenge expiry is checked every round; the matchmaking pass
+ * runs at most once per second (time_t has a resolution of one second). */
 void lobby_tick(time_t now)
 {
+    static time_t last_pass;
+
     for (int i = 0; i < MAX_CHALLENGES; i++) {
         Challenge *ch = &challenges[i];
 
@@ -391,8 +522,12 @@ void lobby_tick(time_t now)
         if (to->fd >= 0)
             send_event(to, EV_CHALLENGE_EXPIRED "|%d", id);
     }
-}
 
+    if (now != last_pass) {
+        last_pass = now;
+        matchmaking_pass(now);
+    }
+}
 
 /* ---------------------------------------------------------------------------------------
  * STATS (docs/protocol.md section 6.4)

@@ -25,7 +25,9 @@ void handle_list_players(Client *c, char *fields[], int nfields);
 void handle_challenge(Client *c, char *fields[], int nfields);
 void handle_challenge_reply(Client *c, char *fields[], int nfields);
 void handle_challenge_cancel(Client *c, char *fields[], int nfields);
-
+/* S7: FIND_MATCH (LOBBY -> IN_QUEUE) and CANCEL_MATCH (IN_QUEUE -> LOBBY). */
+void handle_find_match(Client *c, char *fields[], int nfields);
+void handle_cancel_match(Client *c, char *fields[], int nfields);
 /* STATS or STATS|user (docs/protocol.md section 6.4). */
 void handle_stats(Client *c, char *fields[], int nfields);
 /* Remove every pending challenge that involves c (outgoing or incoming); the other side gets
