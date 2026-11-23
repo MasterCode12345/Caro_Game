@@ -26,6 +26,8 @@ void handle_challenge(Client *c, char *fields[], int nfields);
 void handle_challenge_reply(Client *c, char *fields[], int nfields);
 void handle_challenge_cancel(Client *c, char *fields[], int nfields);
 
+/* STATS or STATS|user (docs/protocol.md section 6.4). */
+void handle_stats(Client *c, char *fields[], int nfields);
 /* Remove every pending challenge that involves c (outgoing or incoming); the other side gets
  * CHALLENGE_CANCELLED|cid. Call when c enters a game or the queue, logs out or disconnects. */
 void challenges_drop_for(Client *c);

@@ -23,7 +23,7 @@
 #include "lobby.h"
 #include "match.h"
 #include "net.h"
-
+#include "db.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -391,4 +391,33 @@ void lobby_tick(time_t now)
         if (to->fd >= 0)
             send_event(to, EV_CHALLENGE_EXPIRED "|%d", id);
     }
+}
+
+
+/* ---------------------------------------------------------------------------------------
+ * STATS (docs/protocol.md section 6.4)
+ * ------------------------------------------------------------------------------------- */
+
+/* STATS or STATS|user (LOBBY, IN_QUEUE): elo and the win / loss / draw counters, read from the
+ * database with db_user_get(), the same function LOGIN uses. Without an argument it is the
+ * caller himself. The user name in the response is the one stored in the database. */
+void handle_stats(Client *c, char *fields[], int nfields)
+{
+    const char *who = (nfields >= 2) ? fields[1] : c->username;
+    UserRow user;
+
+    int found = db_user_get(who, &user);
+
+    if (found < 0) {
+        reply(c, ST_SERVER_ERROR, CMD_STATS, ERR_SERVER_ERROR);
+        return;
+    }
+
+    if (found == 0) {
+        reply(c, ST_NOT_FOUND, CMD_STATS, ERR_USER_NOT_FOUND);
+        return;
+    }
+
+    reply(c, ST_OK, CMD_STATS, "%s|%d|%d|%d|%d",
+          user.username, user.elo, user.wins, user.losses, user.draws);
 }
