@@ -34,8 +34,8 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **M1** (20/11) register/login from GTK; 401, 409 shown
 - [x] **M2** (22/11) two machines see each other, challenge → GAME_START
 - [x] **M3** (24/11) full game between two machines; bad moves rejected
-- [ ] **M4** (26/11) every ending correct, ELO persists after restart
-- [ ] **M5** (28/11) all graded features work
+- [x] **M4** (26/11) every ending correct, ELO persists after restart
+- [x] **M5** (28/11) all graded features work
 - [ ] **Code freeze** (29/11) after the full test table passes
 
 ## Log
@@ -177,14 +177,6 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   set to -1 before anything is sent to other clients. Checked with 57 scripted checks (incl. a
   225-move draw and a disconnect in a running game) on an ASan/UBSan build, S2 regression 36/36,
   `make test` passed, zero warnings.
-- 2026-11-22 · Hân · S3: real `struct Game` table (`match.h`), `game_start()` creates the Game
-  (board, turn X, deadline), `MOVE` with the checks in the exact order of §6.3 (400, 403, 433,
-  430, 431, 432; board unchanged on error), response → `OPP_MOVE` → `GAME_END`, `game_end()`
-  (FIVE with 5 cells, BOARD_FULL, delta "0" until S5), `LEAVE_GAME` checks the gid and ends a
-  running game by RESIGN, `game_detach()` from `session_end()`. Fixed an S1 bug in
-  `session_end()`: two clients closing together recursed hundreds of times (fd is now set to -1
-  first). Checked with 57 scripted checks (incl. a 225-move draw) on an ASan/UBSan build, S2
-  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Nghĩa + Hân · M2 and M3 reached with Hân's real server (S2, S3), two GTK client
   windows: both players see each other in the lobby; challenge, decline, cancel and the 30 s
   expiry; accept -> GAME_START with the challenger as X; the client blocks clicks when it is not
@@ -210,7 +202,6 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   silent connections) filled in. README: "Running over a LAN" (IP, ufw, WSL2 mirrored or
   portproxy, `cli` + PING first, phone hotspot against client isolation) and the Status line.
   C6 not ticked: the bot against the full server (S4–S7) and the two-machine LAN test wait.
-  regression 36/36, `make test` passed, zero warnings.
 - 2026-11-22 · Hân · Quick fix after S3: `TCP_NODELAY` on accepted sockets (Nagle + delayed ACK
   held responses ~40 ms), `listen()` backlog 16 → `SOMAXCONN`. Bot N=20, 30 s, before → after:
   mean 1.523 → 1.254 ms, P95 4.820 → 2.974 ms, max 95.194 → 49.061 ms, ~5 760 → ~6 930
@@ -231,6 +222,11 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   one line each. Checked with 27 scripted checks (1000 vs 1000 → +16 / −16, RESIGN, DRAW,
   DISCONNECT, rows in matches / moves / users, restart keeps the ELO) on an ASan/UBSan build,
   S4 regression passed, `make` zero warnings, `make test` passed.
+- 2026-11-23 · Nghĩa + Hân · M4 reached with Hân's real server (S4, S5), two GTK client windows:
+  resign; draw offer declined, then accepted; rematch with X and O swapped; closing the window
+  during a game -> the opponent wins by DISCONNECT; server stopped and restarted on the same DB
+  keeps the ELO. Still missing: `STATS` on the server (Hân does it first in S6), so after a game
+  the lobby shows "Không lấy được ELO và thành tích từ server: Server chưa hỗ trợ chức năng này".
 - 2026-11-23 · Hân · S4 (STATS): `STATS` / `STATS|user` (L, Q) → `200|STATS|user|elo|wins|losses|draws`,
   read with `db_user_get()` (same function as LOGIN), 404 `user_not_found`. Checked with
   `test_stats.py` and a 10-bot 20 s run on an ASan/UBSan build, `make` zero warnings,
@@ -250,3 +246,18 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   with 29 scripted checks plus the slow ones (gap 150 pairs at 10.0 s, gap 450 never pairs, gap
   400 pairs at 60.1 s, TIMEOUT after 16 s, a move restarts the clock) on an ASan/UBSan build, no
   sanitizer output; S2 regression passed; `make test` passed, zero warnings.
+- 2026-11-24 · Nghĩa + Hân · M5 reached with Hân's real server (S6, S7), two GTK client windows:
+  back in the lobby the top bar shows ELO and W/L/D from STATS; history and replay (Tự chạy)
+  correct; leaderboard in the right order with our own row in bold; quick match pairs and Hủy
+  cancels; C5 steps 18 and 20 (Lịch sử while searching, Đăng xuất while searching) now checked
+  with the real server, as the C5 entry asked; sitting still loses by TIMEOUT when the clock
+  reaches 0. cli on S7 (Linux): STATS / `STATS|user` / `STATS|nobody` (404 user_not_found);
+  FIND_MATCH pairs at once, the longer waiter plays X, 30 s per move; CANCEL_MATCH 200, then 403;
+  15 s per move, X moves at 10 s, O never moves -> GAME_END X_WIN TIMEOUT 16 s later; HISTORY /
+  REPLAY / LEADERBOARD and their 400 / 404 errors; bot `--match` (10 bots, 15 s): 69 games, no
+  error, P95 0.456 ms, server still running. `docs/test_report.md`: rows 16 and 17 updated, rows
+  22 (TIMEOUT) and 23 (history, replay, leaderboard, stats) added. Still waiting: S8 (Hân) --
+  #002 is not really fixed: `net_receive()` in net.c logs the malformed frame but nothing calls
+  it, main.c still closes without a log; and the LAN test on Wednesday 25/11. Also restored what
+  959344b overwrote with an older copy of this file: the M4 tick and log line, and the duplicate
+  S3 entry and stray line removed on 23/11.
