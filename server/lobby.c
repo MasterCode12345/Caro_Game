@@ -2,13 +2,10 @@
  * server/lobby.c — LIST_PLAYERS, PLAYER_STATUS, challenges, matchmaking (docs/protocol.md §6.2).
  * Owner: Hân.
  *
- * S2 (done): LIST_PLAYERS, CHALLENGE, CHALLENGE_REPLY, CHALLENGE_CANCEL, expiry from tick(),
- *            cleanup with challenges_drop_for().
- * TODO(S6): HISTORY, REPLAY, LEADERBOARD, STATS handlers (§6.4) — here or a new file, Hân decides.
- * TODO(S7): FIND_MATCH (L) -> 200, state Q; CANCEL_MATCH (Q) -> 200, state L.
- * TODO(S7): matchmaking pass every second from tick(): pair two queued players whose ELO gap
- *           <= MM_BASE_GAP + MM_STEP_GAP * floor(waited / MM_STEP_SEC), capped at MM_MAX_GAP;
- *           BOARD_SIZE, MATCH_SEC_PER_MOVE; the player who waited longer plays X.
+ * Here: PLAYER_STATUS broadcast, LIST_PLAYERS, CHALLENGE / CHALLENGE_REPLY / CHALLENGE_CANCEL with
+ * their 30 s expiry (lobby_tick) and cleanup (challenges_drop_for), FIND_MATCH / CANCEL_MATCH and
+ * the matchmaking pass (lobby_tick, at most once per second), STATS (section 6.4).
+ * HISTORY, REPLAY and LEADERBOARD are in history.c.
  *
  * Why no mutex: the server is one thread in one select() loop, so exactly one handler runs at
  * a time. A handler can write to ANY client's socket (e.g. CHALLENGE_FROM to the target)
@@ -23,8 +20,9 @@
 #include "lobby.h"
 #include "match.h"
 #include "net.h"
+#include "protocol.h"
 #include "db.h"
-#include <errno.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +39,7 @@ void broadcast_status(const Client *exclude,
     char event[128];
 
     int len = snprintf(event, sizeof(event),
-                       "PLAYER_STATUS|%s|%s|%d",
+                       EV_PLAYER_STATUS "|%s|%s|%d",
                        username, status, elo);
 
     if (len < 0 || (size_t)len >= sizeof(event))
@@ -64,7 +62,7 @@ void broadcast_status(const Client *exclude,
 }
 
 /* ---------------------------------------------------------------------------------------
- * S2: helpers
+ * Helpers and the challenge table
  * ------------------------------------------------------------------------------------- */
 
 #define MAX_CHALLENGES MAX_CLIENTS      /* at most one outgoing challenge per client */
@@ -79,30 +77,14 @@ static int is_logged_in(const Client *c)
             c->state == SESSION_IN_GAME);
 }
 
-const char *client_status(const Client *c)
+/* Status string of a logged-in client as shown to others: IDLE / IN_QUEUE / IN_GAME. */
+static const char *client_status(const Client *c)
 {
     switch (c->state) {
     case SESSION_IN_QUEUE: return PS_IN_QUEUE;
     case SESSION_IN_GAME:  return PS_IN_GAME;
     default:               return PS_IDLE;
     }
-}
-
-/* Decimal integer, whole string consumed (strtol + end pointer), no overflow. */
-static int parse_long(const char *s, long *out)
-{
-    if (s == NULL || *s == '\0')
-        return 0;
-
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-
-    if (errno != 0 || *end != '\0')
-        return 0;
-
-    *out = v;
-    return 1;
 }
 
 static Client *find_by_name(const char *name)
@@ -114,7 +96,8 @@ static Client *find_by_name(const char *name)
     return NULL;
 }
 
-static Challenge *find_challenge(int cid)
+/* cid stays a long: cut to an int, 4294967297 (2^32 + 1) would find challenge 1. */
+static Challenge *find_challenge(long cid)
 {
     for (int i = 0; i < MAX_CHALLENGES; i++) {
         if (challenges[i].used && challenges[i].id == cid)
@@ -273,7 +256,7 @@ void handle_challenge_reply(Client *c, char *fields[], int nfields)
         return;
     }
 
-    Challenge *ch = find_challenge((int)cid);
+    Challenge *ch = find_challenge(cid);
 
     /* Unknown id, or somebody other than the target: the same answer, so a client cannot
      * probe other players' challenge ids. */
@@ -331,7 +314,7 @@ void handle_challenge_cancel(Client *c, char *fields[], int nfields)
         return;
     }
 
-    Challenge *ch = find_challenge((int)cid);
+    Challenge *ch = find_challenge(cid);
 
     if (ch == NULL || ch->from != c) {
         reply(c, ST_NOT_FOUND, CMD_CHALLENGE_CANCEL, ERR_CHALLENGE_NOT_FOUND);
@@ -372,7 +355,7 @@ void challenges_drop_for(Client *c)
 }
 
 /* ---------------------------------------------------------------------------------------
- * S7: matchmaking (FIND_MATCH, CANCEL_MATCH, the pairing pass)
+ * Matchmaking (FIND_MATCH, CANCEL_MATCH, the pairing pass)
  *
  * There is no separate queue structure: the queue IS the set of clients whose state is
  * SESSION_IN_QUEUE, ordered by queued_at. So every way of leaving the queue (CANCEL_MATCH,

@@ -8,12 +8,11 @@ Turn-based online Caro (Gomoku) for the Network Programming course (IT4062E, SoI
 - **Protocol**: our own, over plain TCP sockets, length-prefixed frames — see
   [`docs/protocol.md`](docs/protocol.md).
 
-Status (22/11/2026): milestones M0–M3 reached. Server stages S0–S3 are done (framing, accounts,
-lobby, challenges, full games with move validation and win/draw); S4–S8 (resign, draw, rematch,
-disconnect, ELO in the database, history, matchmaking, move timer, load tests) are in progress.
-The client has every page (C0–C5) and is being polished (C6). Checkpoint 2 ≈ 01/12/2026.
-Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md), the test table in
-[`docs/test_report.md`](docs/test_report.md).
+Status (24/11/2026): milestones M0–M5 reached. Client stages C0–C6 and server stages S0–S8 are
+done: every graded feature works, and the server has been checked with ASan/UBSan, `leaks`,
+malformed requests and a 5-minute load run. Left: the two-machine LAN test. Checkpoint 2 ≈
+01/12/2026. Stage-by-stage progress is in [`docs/progress.md`](docs/progress.md), the test table
+in [`docs/test_report.md`](docs/test_report.md).
 
 ## Install
 
@@ -54,6 +53,40 @@ make                       # everything into build/
 
 Switching between `make debug` and `make` rebuilds every object automatically.
 The policy is zero compiler warnings (`-std=c11 -Wall -Wextra`).
+
+## Server
+
+```bash
+./build/caro_server                        # port 5500, database caro.db
+./build/caro_server 5500                   # another port as first argument
+./build/caro_server 5500 /tmp/test.db      # another database as second argument
+```
+
+- **Files**: `caro.db` (SQLite: users, matches, moves) and `server.log` are created in the
+  **directory the server is started from**, so start it from the repository root. The second
+  argument changes the database path; the log is always `server.log` in the current directory.
+  Both are in `.gitignore`. Data survives a restart; the log is appended to, never cleared.
+- **Log**: one line per request, `time | IP:port | user or - | command | status`, and `EVENT`
+  lines (connections, game start and end, malformed frames, …). Arguments are never logged, so
+  no password is. The same lines go to the terminal. During the demo, in a second terminal:
+
+  ```bash
+  tail -f server.log
+  ```
+
+- **Stop**: Ctrl+C (or `kill <pid>`, SIGTERM) stops cleanly. The server finishes the request it
+  is handling, closes every client socket, the listening socket and the database, logs
+  `server stopped` and exits with code 0. Clients go back to the login page. Games still running
+  at that moment are dropped and not rated; finished games are already saved.
+- **Start the demo with no data**: stop the server first, then, in the same directory:
+
+  ```bash
+  rm caro.db server.log
+  ```
+
+  This deletes every account, match and ELO. The next start creates an empty database.
+- Under a load test, redirect the terminal output (`./build/caro_server 5500 > /dev/null`):
+  printing thousands of lines per second to a terminal slows the server down.
 
 ## Chạy client
 

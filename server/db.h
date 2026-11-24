@@ -2,15 +2,15 @@
  * server/db.h — interface of db.c: SQLite storage (users, matches, moves).
  * Owner: Hân.
  *
- * S1: database initialization and user account storage.
- * S5: finished match storage and ELO / W-L/D update.
- * S6: HISTORY, REPLAY, LEADERBOARD, STATS queries.
+ * User accounts, finished matches (with ELO and W-L-D of both users), and the queries of
+ * HISTORY, REPLAY, LEADERBOARD and STATS.
  */
 #ifndef CARO_SERVER_DB_H
 #define CARO_SERVER_DB_H
 
 #include <sqlite3.h>
 #include <time.h>
+
 /* Return codes */
 #define DB_EXISTS 1
 
@@ -43,6 +43,7 @@ int db_user_create(const char *username, const char *salt, const char *hash);
  * Returns 1 if found, 0 if not found, -1 on error.
  */
 int db_user_get(const char *username, UserRow *out);
+
 /*
  * Save one finished match in ONE transaction: a row in matches, every move in moves, and the
  * elo / wins / losses / draws of both users (elo changes by delta_x / delta_o).
@@ -55,7 +56,8 @@ int db_match_save(int x_user, int o_user, int board_size, int sec_per_move,
                   int delta_x, int delta_o,
                   time_t started_at, time_t ended_at,
                   const int moves[][2], int move_count);
-/* ---- S6: read-only queries for HISTORY, REPLAY, LEADERBOARD ---- */
+
+/* ---- Read-only queries for HISTORY, REPLAY, LEADERBOARD ---- */
 
 /* One line of HISTORY, from the point of view of the user who asked. */
 typedef struct {
@@ -101,4 +103,5 @@ typedef struct {
 
 /* The n best users: elo descending, then username. Returns the number of rows or -1. */
 int db_leaderboard(int n, RankRow *out);
+
 #endif /* CARO_SERVER_DB_H */

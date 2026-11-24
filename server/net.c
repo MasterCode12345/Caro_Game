@@ -2,11 +2,10 @@
  * server/net.c — connection layer: accept, per-client receive, reply(), session_end().
  * Owner: Hân.
  *
- * S0: accept connections, receive framed messages, send replies and close sessions.
- * S1: broadcast OFFLINE when a logged-in client disconnects.
- * S2: drop pending challenges in session_end().
- * S3: take the client out of its game in session_end(); fd is set to -1 first so two clients
- *     closing together cannot make session_end() call itself again and again.
+ * session_end() is the only way a session ends while the server runs: it drops the pending
+ * challenges, takes the client out of its game (DISCONNECT or OPP_LEFT), tells the others
+ * OFFLINE and closes the socket. It sets fd = -1 first, so two clients closing together cannot
+ * make it call itself again and again (docs/issues.md #001).
  */
 #include "net.h"
 #include "protocol.h"
@@ -20,13 +19,19 @@
 #include <errno.h>
 #include <stdarg.h>
 
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 
-int one = 1;
+/* close() and log an error: nothing else can be done about it (the fd is gone either way). */
+static void close_fd(int fd)
+{
+    if (close(fd) < 0)
+        log_event("close failed: %s", strerror(errno));
+}
 
 /* Accept a new client and assign a free slot. */
 int accept_client(int listenfd)
@@ -43,8 +48,21 @@ int accept_client(int listenfd)
         log_event("accept error: %s", strerror(errno));
         return -1;
     }
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one) < 0)
-    log_event("TCP_NODELAY failed: %s", strerror(errno));
+
+    /* select() cannot watch a descriptor >= FD_SETSIZE: FD_SET() would write outside the
+     * fd_set. This is the only place where a descriptor enters clients[], so check it here. */
+    if (fd >= FD_SETSIZE) {
+        log_event("connection rejected: fd %d >= FD_SETSIZE", fd);
+        close_fd(fd);
+        return -1;
+    }
+
+    /* Nagle's algorithm + the client's delayed ACK would hold small responses for ~40 ms. The
+     * game still works without the option, so a failure is only logged. */
+    int no_delay = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) < 0)
+        log_event("TCP_NODELAY failed: %s", strerror(errno));
+
     int slot = -1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd == -1) {
@@ -55,7 +73,7 @@ int accept_client(int listenfd)
 
     if (slot == -1) {
         log_event("connection rejected: client table full");
-        close(fd);
+        close_fd(fd);
         return -1;
     }
 
@@ -69,7 +87,7 @@ int accept_client(int listenfd)
     if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
                    &timeout, sizeof(timeout)) < 0) {
         log_event("SO_SNDTIMEO failed: %s", strerror(errno));
-        close(fd);
+        close_fd(fd);
         return -1;
     }
 
@@ -78,7 +96,7 @@ int accept_client(int listenfd)
     if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
                    &no_sigpipe, sizeof(no_sigpipe)) < 0) {
         log_event("SO_NOSIGPIPE failed: %s", strerror(errno));
-        close(fd);
+        close_fd(fd);
         return -1;
     }
 #endif
@@ -88,7 +106,7 @@ int accept_client(int listenfd)
 
     if (inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip)) == NULL) {
         log_event("inet_ntop failed: %s", strerror(errno));
-        close(fd);
+        close_fd(fd);
         return -1;
     }
 
@@ -213,10 +231,10 @@ void session_end(Client *c)
      * CHALLENGE_CANCELLED. They are matched by pointer, so fd = -1 does not matter. */
     challenges_drop_for(c);
 
-    /* S3: take c out of its game so no Game keeps a pointer to this slot (S4 adds the
-     * DISCONNECT result). */
+    /* Take c out of its game so no Game keeps a pointer to this slot. A running game ends with
+     * reason DISCONNECT; after an ended one the opponent gets OPP_LEFT. */
     game_detach(c);
-    
+
     /* game_detach() may have ended a running game and changed c's ELO: use the new value. */
     elo = c->elo;
     /* Notify other logged-in clients (broadcast_status skips fd < 0, so never c itself). */
@@ -226,7 +244,7 @@ void session_end(Client *c)
 
     log_event("disconnected: %s", c->addr);
 
-    close(fd);
+    close_fd(fd);
 
     c->addr[0] = '\0';
     c->state = SESSION_CONNECTED;
@@ -242,33 +260,41 @@ void session_end(Client *c)
     frame_init(&c->in);
 }
 
-/* Receive and drain complete frames from a client. */
+/* Called by the select() loop when c's socket is readable.
+ *
+ * frame_recv() is called exactly ONCE: select() only promises that one recv() will not block, a
+ * second one could stop the whole server until this client sends more. Then every complete
+ * frame in the buffer is handled (several requests may arrive glued together); an incomplete
+ * one stays in c->in until the next time the socket is readable. */
 void net_receive(Client *c)
 {
     if (c == NULL || c->fd < 0)
         return;
 
-    int n = frame_recv(&c->in, c->fd);
-
-    if (n <= 0) {
+    /* 0: the peer closed the connection; -1: error. */
+    if (frame_recv(&c->in, c->fd) <= 0) {
         session_end(c);
         return;
     }
 
-    char message[FRAME_MAX_PAYLOAD + 1];
+    char msg[FRAME_MAX_PAYLOAD + 1];
 
+    /* handle_message() can end c's own session (a failed send): check fd after every message. */
     while (c->fd >= 0) {
-        int result = frame_next(&c->in, message, sizeof(message));
+        int result = frame_next(&c->in, msg, sizeof(msg));
 
         if (result == 0)
-            break;
+            break;                      /* need more bytes */
 
         if (result < 0) {
-            log_event("malformed frame: %s", c->addr);
+            /* LENGTH 0 or > 16384: after it the stream has no known frame boundary any more,
+             * so the only thing left is to close (docs/protocol.md section 1). Logged before
+             * session_end(), which clears c->addr. */
+            log_event("malformed frame from %s", c->addr);
             session_end(c);
             return;
         }
 
-        handle_message(c, message);
+        handle_message(c, msg);
     }
 }

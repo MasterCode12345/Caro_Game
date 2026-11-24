@@ -10,8 +10,8 @@
 #include "db.h"
 #include "match.h"
 #include "net.h"
+#include "protocol.h"
 
-#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,23 +20,6 @@
 /* A page number far beyond any real database is a bad argument, not an empty page; it also
  * keeps (page - 1) * 10 far away from any overflow. */
 #define HISTORY_MAX_PAGE 1000000
-
-/* Decimal integer, whole string consumed (strtol + end pointer), no overflow. */
-static int parse_long(const char *s, long *out)
-{
-    if (s == NULL || *s == '\0')
-        return 0;
-
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-
-    if (errno != 0 || *end != '\0')
-        return 0;
-
-    *out = v;
-    return 1;
-}
 
 /* snprintf at the end of buf: appends to buf[*used], returns 0, or -1 if it does not fit. */
 static int append(char *buf, size_t cap, size_t *used, const char *fmt, ...)

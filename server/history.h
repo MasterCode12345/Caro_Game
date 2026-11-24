@@ -2,7 +2,7 @@
  * server/history.h — interface of history.c.
  * Owner: Hân.
  *
- * S6: HISTORY, REPLAY, LEADERBOARD (docs/protocol.md section 6.4). STATS is in lobby.c.
+ * HISTORY, REPLAY, LEADERBOARD (docs/protocol.md section 6.4). STATS is in lobby.c.
  */
 #ifndef CARO_SERVER_HISTORY_H
 #define CARO_SERVER_HISTORY_H

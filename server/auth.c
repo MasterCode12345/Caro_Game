@@ -70,9 +70,8 @@ static int generate_salt(char salt[33])
         return -1;
 
     size_t count = fread(bytes, 1, sizeof(bytes), fp);
-    fclose(fp);
 
-    if (count != sizeof(bytes))
+    if (fclose(fp) != 0 || count != sizeof(bytes))
         return -1;
 
     static const char hex[] = "0123456789abcdef";
@@ -206,7 +205,12 @@ void handle_login(Client *c, char *fields[], int nfields)
 
     int result = db_user_get(username, &user);
 
-    if (result != 1) {
+    if (result < 0) {                   /* database error: not the user's fault */
+        reply(c, ST_SERVER_ERROR, CMD_LOGIN, ERR_SERVER_ERROR);
+        return;
+    }
+
+    if (result == 0) {
         reply(c, ST_NOT_AUTHENTICATED, CMD_LOGIN,
               ERR_INVALID_CREDENTIALS);
         return;
@@ -234,9 +238,11 @@ void handle_login(Client *c, char *fields[], int nfields)
     c->draws = user.draws;
     c->state = SESSION_LOBBY;
 
-    /* Send login response before broadcasting the event. */
-    reply(c, ST_OK, CMD_LOGIN, "%s|%d|%d|%d|%d",
-          c->username, c->elo, c->wins, c->losses, c->draws);
+    /* Response before the event (protocol.md section 3). If this send fails, session_end() has
+     * already reset c: broadcasting now would send PLAYER_STATUS with an empty name. */
+    if (reply(c, ST_OK, CMD_LOGIN, "%s|%d|%d|%d|%d",
+              c->username, c->elo, c->wins, c->losses, c->draws) < 0)
+        return;
 
     broadcast_status(c, c->username, PS_IDLE, c->elo);
 }
@@ -252,11 +258,16 @@ void handle_logout(Client *c, char *fields[], int nfields)
 
     snprintf(username, sizeof(username), "%s", c->username);
 
-    /* Pending challenges involving this player are cancelled (protocol.md 6.2). */
+    /* Response before the events. If this send fails, session_end() has done everything below. */
+    if (reply(c, ST_OK, CMD_LOGOUT, NULL) < 0)
+        return;
+
+    /* Pending challenges involving this player are cancelled (protocol.md 6.2). A failed send to
+     * the other side can end sessions, c's own included: then there is nothing left to do. */
     challenges_drop_for(c);
 
-    /* Send response before broadcasting OFFLINE. */
-    reply(c, ST_OK, CMD_LOGOUT, NULL);
+    if (c->fd < 0)
+        return;
 
     c->state = SESSION_CONNECTED;
     c->user_id = 0;

@@ -2,9 +2,7 @@
  * server/lobby.h — interface of lobby.c.
  * Owner: Hân.
  *
- * S1: PLAYER_STATUS broadcast.
- * S2: LIST_PLAYERS and challenges (create / reply / cancel / expiry / cleanup).
- * Later stages: matchmaking.
+ * PLAYER_STATUS broadcast, LIST_PLAYERS, challenges, matchmaking, STATS.
  */
 #ifndef CARO_SERVER_LOBBY_H
 #define CARO_SERVER_LOBBY_H
@@ -17,15 +15,12 @@ void broadcast_status(const Client *exclude,
                      const char *status,
                      int elo);
 
-/* Status string of a logged-in client as shown to others: IDLE / IN_QUEUE / IN_GAME. */
-const char *client_status(const Client *c);
-
 /* Request handlers (signature of the command table in protocol.c). */
 void handle_list_players(Client *c, char *fields[], int nfields);
 void handle_challenge(Client *c, char *fields[], int nfields);
 void handle_challenge_reply(Client *c, char *fields[], int nfields);
 void handle_challenge_cancel(Client *c, char *fields[], int nfields);
-/* S7: FIND_MATCH (LOBBY -> IN_QUEUE) and CANCEL_MATCH (IN_QUEUE -> LOBBY). */
+/* FIND_MATCH (LOBBY -> IN_QUEUE) and CANCEL_MATCH (IN_QUEUE -> LOBBY). */
 void handle_find_match(Client *c, char *fields[], int nfields);
 void handle_cancel_match(Client *c, char *fields[], int nfields);
 /* STATS or STATS|user (docs/protocol.md section 6.4). */
@@ -35,7 +30,8 @@ void handle_stats(Client *c, char *fields[], int nfields);
 void challenges_drop_for(Client *c);
 
 /* Called once per select() loop from tick(): expire challenges older than
- * CHALLENGE_EXPIRE_SEC (both sides get CHALLENGE_EXPIRED|cid). */
+ * CHALLENGE_EXPIRE_SEC (both sides get CHALLENGE_EXPIRED|cid), and pair queued players at most
+ * once per second. */
 void lobby_tick(time_t now);
 
 #endif /* CARO_SERVER_LOBBY_H */

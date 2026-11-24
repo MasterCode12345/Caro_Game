@@ -26,7 +26,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **S5** (25–26/11) DB + ELO
 - [x] **S6** (27–28/11) history/replay/leaderboard
 - [x] **S7** (27–28/11) matchmaking, timers
-- [ ] **S8** (29/11) valgrind, malformed input, load
+- [x] **S8** (29/11) valgrind, malformed input, load
 
 ## Integration milestones — both, evening
 
@@ -261,3 +261,29 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   it, main.c still closes without a log; and the LAN test on Wednesday 25/11. Also restored what
   959344b overwrote with an older copy of this file: the M4 tick and log line, and the duplicate
   S3 entry and stray line removed on 23/11.
+- 2026-11-24 · Nghĩa (thay Hân) · S8, done by Nghĩa with Hân's agreement (exception to the ownership
+  rule, for this stage only). #002: `main.c` calls `net_receive()` (its duplicate receive loop is
+  gone), which logs `malformed frame from <addr>` before closing. Clean stop: SIGINT / SIGTERM with
+  `sigaction()` and no SA_RESTART, the handler only sets a `volatile sig_atomic_t` flag; after the
+  loop every client fd, the listening socket and the database are closed, `server stopped` is
+  logged, exit code 0 (running games are dropped, not rated). Checked with two real GTK windows in a
+  game, SIGINT and SIGTERM: both back on the login page with "Mất kết nối tới server".
+  Malformed requests, 108 checked against protocol.md, all right now; wrong before: a cid + 2^32 was
+  cut to an int and matched the challenge; the number of fields was checked before the state rule
+  of §4; ` 3` and `+3` were accepted as integers (one `parse_long()` in protocol.c instead of three
+  copies); an unknown command of more than 16 364 bytes closed the connection instead of getting
+  its 400. Also: LOGIN / LOGOUT stop when their response cannot be sent (LOGIN would have broadcast
+  a PLAYER_STATUS with an empty name), LOGIN answers 500 on a database error, server.log keeps only
+  the [A-Z_] part of an unknown command (`LOGIN han 123456` with spaces logged the password, `\n`
+  forged a log line), fd >= FD_SETSIZE is refused in `accept_client()`. No TODO left in `server/`,
+  stale stage comments rewritten, no uncalled function, every syscall checked.
+  ASan/UBSan: 0 reports; `leaks --atExit`: 0 leaks for 0 total leaked bytes (84 scripted checks,
+  108 malformed requests, bot 10 for 30 s, bot 10 `--match` for 20 s, SIGINT). Load, 5 minutes, 20
+  bots + 50 silent connections: 124 065 games, 13 524 134 moves, mean 0.196 ms, P95 0.797 ms, RSS
+  between 3.9 and 4.7 MB with no growth, matches in the database accounted for one by one. 98
+  clients killed at the same moment: server keeps running. `make` 0 warnings (also gcc-15 -O0 and
+  -O2 for `server/` and `common/`), `make test` passed. Not done here: the build and run on Linux
+  (checked separately after the push) and valgrind (optional).
+  Seen on macOS only under full bot load, cause not found: in 3 of 100 stops one bot's connection
+  stayed ESTABLISHED although the server process had exited; no crash, hang of the server or lost
+  data (database consistent after the whole series). README: new section "Server", Status line updated.

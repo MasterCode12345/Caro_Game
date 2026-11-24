@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#define ELO_START 1000
 
 /* Single SQLite connection: the server uses one select() loop. */
 static sqlite3 *db = NULL;
@@ -108,10 +107,14 @@ int db_open(const char *path)
 /* Close database connection. */
 void db_close(void)
 {
-    if (db != NULL) {
-        sqlite3_close(db);
-        db = NULL;
-    }
+    if (db == NULL)
+        return;
+
+    /* SQLITE_BUSY here means a statement was not finalized: a leak in this file. */
+    if (sqlite3_close(db) != SQLITE_OK)
+        fprintf(stderr, "[DB] Close failed: %s\n", sqlite3_errmsg(db));
+
+    db = NULL;
 }
 
 /* Create a new user. */
@@ -221,7 +224,7 @@ int db_user_get(const char *username, UserRow *out)
 }
 
 /* ---------------------------------------------------------------------------------------
- * S5: finished matches
+ * Finished matches
  * ------------------------------------------------------------------------------------- */
 
 /* t as local time 'YYYY-MM-DD HH:MM:SS' (19 characters + '\0'; cap must be >= 20). */
@@ -366,9 +369,8 @@ fail:
     return -1;
 }
 
-
 /* ---------------------------------------------------------------------------------------
- * S6: HISTORY, REPLAY, LEADERBOARD (read only)
+ * HISTORY, REPLAY, LEADERBOARD (read only)
  * ------------------------------------------------------------------------------------- */
 
 /* Copy a column text into a fixed buffer (NULL -> empty string, too long -> cut). */

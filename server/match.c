@@ -1,24 +1,17 @@
 /*
- * server/match.c — MOVE / LEAVE handlers, game_start(), game_end()
- * (docs/protocol.md §6.3, §7, §8).
+ * server/match.c — everything about running and ended games (docs/protocol.md §6.3, §7, §8):
+ * the Game table, game_start(), game_end(), game_detach(), the move timer and the in-game requests.
  * Owner: Hân.
  *
- * S3: struct Game table, game_start(), MOVE with the checks in the exact order of §6.3,
- *     game_end(), LEAVE_GAME (checks the gid, a running game is ended by RESIGN first).
- * Remaining stages (CLAUDE.md Roadmap):
- * TODO(S4): RESIGN|gid -> GAME_END reason RESIGN (433 on an ended game).
- * TODO(S4): DRAW_OFFER|gid (409 offer_pending) -> opponent gets DRAW_OFFERED|gid;
- *           DRAW_REPLY|gid|ACCEPT -> GAME_END DRAW / DRAW_AGREED;
- *           DRAW_REPLY|gid|DECLINE -> offerer gets DRAW_DECLINED|gid; 404 no_pending_offer.
- * TODO(S4): REMATCH|gid (ended game; 404 opponent_left, 409 offer_pending) ->
- *           REMATCH_REQUESTED|gid; REMATCH_REPLY|gid|ACCEPT -> new gid, X and O swapped,
- *           GAME_START to both; DECLINE -> requester gets REMATCH_DECLINED|gid.
- * TODO(S4): disconnect (game_detach() from session_end()): running game -> opponent wins,
- *           reason DISCONNECT; ended game -> OPP_LEFT|gid.
- * TODO(S5): game_end() rates every finished game (incl. RESIGN, TIMEOUT, DISCONNECT) with
- *           elo.c, stores the match and its moves (db.c), PLAYER_STATUS with the new ELO.
- * TODO(S7): move timer from tick(): the player to move loses, reason TIMEOUT, after
- *           sec_per_move seconds.
+ * game_start()  GAME_START to both; called for an accepted challenge, a matched pair, a rematch.
+ * game_end()    the ONLY way a game ends (FIVE, BOARD_FULL, RESIGN, DRAW_AGREED, TIMEOUT,
+ *               DISCONNECT): rates both players (elo.c), saves the match, its moves and both users
+ *               in one transaction (db.c), then sends GAME_END and the new ELO in PLAYER_STATUS.
+ * game_detach() called by session_end(): a running game is won by the opponent (DISCONNECT), after
+ *               an ended one he gets OPP_LEFT.
+ * match_tick()  the move timer: the player to move loses by TIMEOUT after sec_per_move seconds.
+ * Handlers      MOVE (checks in the exact order of §6.3), LEAVE_GAME, RESIGN, DRAW_OFFER,
+ *               DRAW_REPLY, REMATCH, REMATCH_REPLY (new gid, X and O swapped).
  *
  * Same rule as lobby.c: every send can fail, and a failed send ends THAT client's session,
  * which calls game_detach(). So the game is fully updated BEFORE anything is sent, and after a
@@ -28,15 +21,13 @@
 #include "match.h"
 #include "lobby.h"
 #include "net.h"
+#include "protocol.h"
 #include "db.h"
 #include "elo.h"
 #include "log.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <limits.h>
 
 static Game games[MAX_CLIENTS];    /* a client is in at most one game: 100 slots are enough */
 static int next_gid = 1;           /* game ids grow from 1 */
@@ -44,23 +35,6 @@ static int next_gid = 1;           /* game ids grow from 1 */
 /* ---------------------------------------------------------------------------------------
  * helpers
  * ------------------------------------------------------------------------------------- */
-
-/* Decimal integer, whole string consumed, no overflow. 1 = ok. */
-static int parse_long(const char *s, long *out)
-{
-    if (s == NULL || *s == '\0')
-        return 0;
-
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-
-    if (errno != 0 || *end != '\0')
-        return 0;
-
-    *out = v;
-    return 1;
-}
 
 static Game *alloc_game(void)
 {
@@ -145,7 +119,7 @@ void game_start(Client *x, Client *o, int size, int sec)
     snprintf(xname, sizeof(xname), "%s", x->username);
     snprintf(oname, sizeof(oname), "%s", o->username);
     int xelo = x->elo, oelo = o->elo;
-    
+
     log_event("game start: gid=%d %s(X) vs %s(O) size=%d sec=%d", gid, xname, oname, size, sec);
     send_event(x, EV_GAME_START "|%d|%d|" SYM_X "|%s|%d|%d", gid, size, oname, oelo, sec);
     send_event(o, EV_GAME_START "|%d|%d|" SYM_O "|%s|%d|%d", gid, size, xname, xelo, sec);
@@ -306,7 +280,8 @@ void game_detach(Client *c)
     if (!was_running && opp != NULL && opp->fd >= 0)
         send_event(opp, EV_OPP_LEFT "|%d", id);
 }
-/* S7: the move timer. Every move sets g->deadline = now + sec (handle_move, game_start), so
+
+/* The move timer. Every move sets g->deadline = now + sec (handle_move, game_start), so
  * a running game whose deadline has passed means the player to move did not answer in time.
  *
  * No thread, no alarm(), no timer file descriptor: main() calls select() with a 1 second
@@ -331,6 +306,7 @@ void match_tick(time_t now)
         game_end(g, winner, END_TIMEOUT, NULL);
     }
 }
+
 /* ---------------------------------------------------------------------------------------
  * MOVE|gid|row|col (IN_GAME)
  * ------------------------------------------------------------------------------------- */
@@ -469,9 +445,8 @@ void handle_leave_game(Client *c, char *fields[], int nfields)
         send_event(opp, EV_OPP_LEFT "|%d", id);
 }
 
-
 /* ---------------------------------------------------------------------------------------
- * S4: RESIGN, DRAW_OFFER, DRAW_REPLY, REMATCH, REMATCH_REPLY
+ * RESIGN, DRAW_OFFER, DRAW_REPLY, REMATCH, REMATCH_REPLY
  *
  * Every handler follows the same order: validate -> change the Game -> response to the sender
  * -> events. After the response (a send that can fail) the handler checks again that the

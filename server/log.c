@@ -2,8 +2,9 @@
  * server/log.c — server.log, one line per request.
  * Owner: Hân.
  *
- * S0: logging requests and server events to server.log and stdout.
- * Never log passwords.
+ * Requests and server events, to server.log and stdout. Never log passwords: log_line() gets the
+ * command name only, never the arguments, and copy_command() cuts anything that does not look
+ * like a command name.
  */
 #include "log.h"
 
@@ -19,8 +20,25 @@ static void timestamp(char *buf, size_t cap)
     time_t now = time(NULL);
     struct tm tm_now;
 
-    localtime_r(&now, &tm_now);
-    strftime(buf, cap, "%Y-%m-%d %H:%M:%S", &tm_now);
+    if (localtime_r(&now, &tm_now) == NULL ||
+        strftime(buf, cap, "%Y-%m-%d %H:%M:%S", &tm_now) == 0)
+        snprintf(buf, cap, "0000-00-00 00:00:00");
+}
+
+/* Command name for the log. An unknown command is text chosen by the client: "LOGIN han 123456"
+ * (spaces instead of '|') would put a password in the log, "X\n2026-..." would forge a log line,
+ * and escape characters would reach the terminal that shows the log. So only the leading
+ * [A-Z_] part is kept, "..." marks a cut. */
+static void copy_command(char *out, size_t cap, const char *cmd)
+{
+    size_t n = 0;
+
+    while (n + 4 < cap && ((cmd[n] >= 'A' && cmd[n] <= 'Z') || cmd[n] == '_')) {
+        out[n] = cmd[n];
+        n++;
+    }
+
+    snprintf(out + n, cap - n, "%s", cmd[n] == '\0' ? "" : "...");
 }
 
 /* Open the log file in append mode. */
@@ -40,18 +58,20 @@ int log_open(const char *path)
     return 0;
 }
 
-/* Close the log file. */
+/* Last line of the run, then close the log file. */
 void log_close(void)
 {
+    log_event("server stopped");
+
     if (log_file != NULL) {
-        log_event("server stopped");
-        fclose(log_file);
+        if (fclose(log_file) != 0)
+            perror("fclose server.log");
         log_file = NULL;
     }
 }
 
 /* Write one request line. */
-void log_line(Client *c, const char *cmd, int code)
+void log_line(const Client *c, const char *cmd, int code)
 {
     char ts[32];
     timestamp(ts, sizeof(ts));
@@ -59,7 +79,10 @@ void log_line(Client *c, const char *cmd, int code)
     const char *addr = (c != NULL) ? c->addr : "-";
     const char *username =
         (c != NULL && c->username[0] != '\0') ? c->username : "-";
-    const char *command = (cmd != NULL) ? cmd : "-";
+    char command[40] = "-";
+
+    if (cmd != NULL)
+        copy_command(command, sizeof(command), cmd);
 
     char line[512];
 
