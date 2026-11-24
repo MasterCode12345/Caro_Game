@@ -101,6 +101,17 @@ int parse_long(const char *s, long *out)
     return 1;
 }
 
+/* Make an unknown command safe to echo. Section 3 says "as received", but section 2 forbids \r and
+ * \n in a field, so every ASCII control character becomes '?'. Bytes >= 0x80 (UTF-8) are kept.
+ * unsigned char: a plain char may be signed, and UTF-8 bytes would then compare as negative. */
+static void sanitize_command(char *cmd)
+{
+    for (unsigned char *p = (unsigned char *)cmd; *p != '\0'; p++) {
+        if (*p < 0x20 || *p == 0x7F)
+            *p = '?';
+    }
+}
+
 void handle_message(Client *c, char *msg)
 {
     if (c == NULL || msg == NULL || c->fd < 0)
@@ -124,11 +135,12 @@ void handle_message(Client *c, char *msg)
     }
 
     if (cmd == NULL) {
-        /* The command is echoed as received (section 3); one that fills the whole frame is cut,
-         * because every request must still get its one response. */
+        /* Echoed in the response (section 3). One that fills the whole frame is cut, because
+         * every request must still get its one response. */
         if (strlen(cmd_name) > MAX_UNKNOWN_CMD)
             cmd_name[MAX_UNKNOWN_CMD] = '\0';
 
+        sanitize_command(cmd_name);
         reply(c, ST_BAD_REQUEST, cmd_name, ERR_UNKNOWN_COMMAND);
         return;
     }

@@ -282,8 +282,16 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   bots + 50 silent connections: 124 065 games, 13 524 134 moves, mean 0.196 ms, P95 0.797 ms, RSS
   between 3.9 and 4.7 MB with no growth, matches in the database accounted for one by one. 98
   clients killed at the same moment: server keeps running. `make` 0 warnings (also gcc-15 -O0 and
-  -O2 for `server/` and `common/`), `make test` passed. Not done here: the build and run on Linux
-  (checked separately after the push) and valgrind (optional).
+  -O2 for `server/` and `common/`), `make test` passed. Not done: valgrind (optional).
+  Checked on Linux after the push (24/11, gcc build, by Nghĩa): `make` 0 warnings, `make test`
+  28/28, no TODO left; #002 logs `malformed frame from ...`; regression of test report rows 9, 11,
+  12, 13 and of S4–S7 all right; SIGTERM while 20 bots + 30 idle connections were running ->
+  `server stopped`, exit 0; restart on the same DB keeps the data, `PRAGMA integrity_check` = ok.
+  Protocol questions from the malformed requests, decided by Nghĩa, protocol.md unchanged: a number
+  beyond 64 bits stays 400 `bad_args` (431 is for valid numbers outside the board); HISTORY pages
+  above 1 000 000 stay 400; LEADERBOARD|50 stays cut to 20 (§6.4); control characters (< 0x20, 0x7F)
+  in an echoed unknown command are now replaced by `?` (§2), e.g. `HELLO\nX` ->
+  `400|HELLO?X|unknown_command`; cutting an overlong command name stays out of §3.
   Seen on macOS only under full bot load, cause not found: in 3 of 100 stops one bot's connection
   stayed ESTABLISHED although the server process had exited; no crash, hang of the server or lost
   data (database consistent after the whole series). README: new section "Server", Status line updated.
