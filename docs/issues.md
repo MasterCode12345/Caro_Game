@@ -41,7 +41,7 @@ Copy this block to the top of the list below and fill it in.
   `EVENT | disconnected: <addr>`.
 - **Suggested fix:** in `server/main.c`, in the `frame_result < 0` branch, call
   `log_event("malformed frame from %s", c->addr)` before `session_end(c)`.
-- **Status:** OPEN (Hân, in S8)
+- **Status:** FIXED eec96ce
 
 ### #001 — session_end() recursion when clients disconnect together
 
