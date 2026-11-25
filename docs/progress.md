@@ -14,7 +14,7 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
 - [x] **C3** (23–24/11) board view, moves, result
 - [x] **C4** (25–26/11) game controls, disconnect handling
 - [x] **C5** (27–28/11) history, replay, leaderboard, quick match, countdown
-- [ ] **C6** (29/11) bot, LAN test, polish
+- [x] **C6** (29/11) bot, LAN test, polish
 
 ## Server — Hân (`server/`)
 
@@ -295,3 +295,9 @@ Checkpoint 2 ≈ 01/12/2026 · code freeze 29/11 evening.
   Seen on macOS only under full bot load, cause not found: in 3 of 100 stops one bot's connection
   stayed ESTABLISHED although the server process had exited; no crash, hang of the server or lost
   data (database consistent after the whole series). README: new section "Server", Status line updated.
+- 2026-11-25 · Nghĩa + Hân · LAN test: server in an Ubuntu VM (VirtualBox, Bridged Adapter,
+  172.20.10.5) on Hân's machine, clients on Nghĩa's MacBook (172.20.10.2) and in the VM, over an
+  iPhone hotspot: lobby, challenge, full game to FIVE, resign, draw, rematch, timeout, server
+  stopped during a game, all right. Bot over the LAN from the Mac (20 bots, 60 s) during a GUI
+  game: 293 games, 33 464 moves, mean 17.06 ms, P95 29.8 ms, max 222 ms, errors only 404:4 409:1,
+  "mutex OK". `docs/test_report.md`: rows 4, 7, 12 and 21 updated, no row open. C6 ticked.

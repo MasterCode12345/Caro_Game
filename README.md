@@ -225,6 +225,15 @@ has to change: the clients only need its LAN IP address and an open port 5500.
 online. Use a phone hotspot instead: connect
 the server and every client to it, find the server's IP again (step 2), and repeat step 5.
 
+Notes from the LAN test (25/11/2026):
+
+- **Server in VirtualBox**: set the VM's network adapter to **Bridged Adapter**. With NAT, other
+  machines cannot see the VM.
+- **macOS, "No route to host"**: macOS can block VS Code's terminal (Local Network permission).
+  Run from Terminal.app, or allow VS Code in System Settings > Privacy & Security > Local Network.
+- **iPhone hotspot**: addresses are `172.20.10.x`. Find them with `ip -4 addr` (Ubuntu) or
+  `ipconfig getifaddr en0` (macOS).
+
 ## Team
 
 | Folder | Owner |
